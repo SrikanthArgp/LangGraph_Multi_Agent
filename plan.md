@@ -13,7 +13,7 @@ This plan transforms it into a production REST API with:
 - Per-user conversation sessions
 - PostgreSQL for durable conversation history + LangGraph checkpoints
 - Redis for fast last-5-session listing per user
-- RAGAS + LangSmith-based evaluation testing
+- Langfuse for agent observability (request tracing) + RAGAS-based evaluation testing
 
 ---
 
@@ -45,6 +45,11 @@ Multi-Agent/
 │   │   ├── session.py             # ChatSession ORM model
 │   │   ├── message.py             # Message ORM model
 │   │   └── refresh_token.py       # RefreshToken ORM model
+│   ├── crud/                      # NEW: thin query functions shared by routers (added Phase 6, not Phase 2)
+│   │   ├── __init__.py
+│   │   ├── users.py                # get_user_by_email, get_user_by_id, create_user
+│   │   ├── sessions.py              # get_session (ownership-checked), list_sessions, create_session, delete_session
+│   │   └── messages.py              # create_message, list_messages_for_session
 │   └── migrations/
 │       ├── env.py                 # Alembic env (async-aware)
 │       ├── script.py.mako
@@ -64,10 +69,14 @@ Multi-Agent/
 │
 ├── eval/
 │   ├── __init__.py
-│   ├── dataset.py                 # 25 static QA pairs + push-to-LangSmith function
+│   ├── dataset.py                 # 25 static QA pairs + push-to-Langfuse function
 │   ├── metrics.py                 # RAGAS metric objects + threshold dict
-│   ├── langsmith_eval.py          # create_or_get_dataset, run_target, build_ragas_evaluators
+│   ├── langfuse_eval.py           # create_or_get_dataset, run_target, score_with_ragas
 │   └── run_eval.py                # CLI: python -m eval.run_eval [--experiment-name foo]
+│
+├── observability/
+│   ├── __init__.py
+│   └── langfuse_client.py         # get_langfuse_handler() factory — shared by main.py, api/routers/chat.py, eval/
 │
 ├── chains/                        # UNCHANGED
 ├── nodes/                         # UNCHANGED
@@ -359,6 +368,34 @@ async def lifespan(app: FastAPI):
 
 `get_graph` dependency creates `AsyncPostgresSaver(request.app.state.pg_pool)` per request (cheap — pool is the singleton).
 
+---
+
+## Observability (Langfuse)
+
+**Decision (2026-07-02):** use **Langfuse Cloud** for agent observability, **replacing** the LangSmith tracing this plan originally specified. One dashboard, one set of API keys, no double-instrumentation. Langfuse traces every node/chain/LLM call in the CRAG graph (routing decision, retrieval, grading, generation, hallucination/answer checks) with latency, token cost, and full input/output per step — and doubles as the dataset/scoring backend for Phase 7's RAGAS eval suite, so evals and production traces live in the same place.
+
+Implementation note: this should be wired in as soon as `create_app()` exists (Phase 5) so every subsequent phase's manual testing is already traced — it's numbered Phase 10 below only to avoid renumbering the phases this doc (and `completed.md`, `tests/phaseN_*/`, `test_reports/phaseN_*/`) already references elsewhere.
+
+### `observability/langfuse_client.py`
+```python
+from langfuse.langchain import CallbackHandler
+
+def get_langfuse_handler() -> CallbackHandler:
+    return CallbackHandler()  # reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST from env
+```
+
+### Wiring into the graph
+Every place that calls `.invoke()` / `.stream()` on the compiled graph passes the handler via `config`:
+```python
+from observability.langfuse_client import get_langfuse_handler
+
+langfuse_handler = get_langfuse_handler()
+app.stream(inputs, config={"configurable": {"thread_id": thread_id}, "callbacks": [langfuse_handler]})
+```
+- `main.py` (CLI) — pass it in the existing `app.stream(...)` call.
+- `api/routers/chat.py` (Phase 6) — pass it in both the sync-invoke and SSE-stream paths; also set `trace_name`, `user_id`, `session_id` via `langfuse.propagate_attributes(...)` so traces are filterable by user/session in the dashboard.
+- `eval/langfuse_eval.py` (Phase 7) — use the per-dataset-item handler from `item.get_langchain_handler(run_name=...)` instead (auto-links the trace to the dataset item for scoring).
+
 ### Inline the LangChain Hub prompt (`chains/generation.py`)
 `hub.pull("rlm/rag-prompt")` makes a live network call at import time. Replace with:
 ```python
@@ -377,6 +414,8 @@ Answer:""")
 ---
 
 ## Evaluation Testing
+
+> **Provider note:** this section uses **Langfuse**, not LangSmith — see [Observability](#observability-langfuse) below for why. `LANGCHAIN_TRACING_V2`/`LANGCHAIN_API_KEY`/`LANGSMITH_*` are not used anywhere in this plan.
 
 ### Dataset (`eval/dataset.py`)
 25 static QA pairs drawn from the three ingested Lilian Weng blog posts:
@@ -401,20 +440,20 @@ THRESHOLDS = {
 }
 ```
 
-### LangSmith Wiring (`eval/langsmith_eval.py`)
-- `create_or_get_dataset(name)` — pushes QA pairs to LangSmith (idempotent)
-- `run_target(inputs)` — invokes `create_app(MemorySaver())` with a fresh `thread_id` per sample; returns `{answer, contexts}`
-- `build_ragas_evaluators()` — wraps RAGAS metrics as LangSmith-compatible evaluators via `ragas.integrations.langsmith`
+### Langfuse Wiring (`eval/langfuse_eval.py`)
+- `create_or_get_dataset(name)` — `langfuse.create_dataset(name=...)` + `create_dataset_item(...)` per sample (idempotent; Langfuse no-ops on duplicate item content)
+- `run_target(item)` — for each `dataset.items`, gets a trace-linking callback via `item.get_langchain_handler(run_name=...)`, invokes `create_app(MemorySaver())` with a fresh `thread_id` and `config={"callbacks": [handler]}`; returns `{answer, contexts, trace_id}`
+- `score_and_push(trace_id, scores: dict[str, float])` — computes the 4 RAGAS metrics locally (same `ragas` calls as before, no LangSmith-specific `ragas.integrations` needed) then attaches each as a score on the linked trace via `generation.score(name=..., value=...)` (or `langfuse.create_score(name=..., value=..., trace_id=...)`)
 
 ### Eval Runner (`eval/run_eval.py`)
 ```bash
 python -m eval.run_eval
 python -m eval.run_eval --experiment-name prod-baseline-v1
 ```
-- Runs all 25 samples through LangSmith `evaluate()`
+- Runs all 25 samples through `eval/langfuse_eval.py`, scoring each via RAGAS and pushing scores back to the linked Langfuse trace
 - Prints per-metric markdown table with Pass/Fail vs thresholds
 - Exits with code `1` if any metric falls below threshold (enables CI gating)
-- Prints the LangSmith experiment URL
+- Prints the Langfuse dataset run URL (`https://cloud.langfuse.com/project/<id>/datasets/<dataset_id>`)
 
 ---
 
@@ -446,13 +485,15 @@ CORS_ORIGINS=http://localhost:3000
 # Existing (unchanged)
 OPENAI_API_KEY=sk-...
 TAVILY_API_KEY=tvly-...
-LANGCHAIN_API_KEY=ls__...
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=crag-production
+
+# Langfuse — Cloud (get keys from: https://cloud.langfuse.com → project settings)
+# Other regions: US https://us.cloud.langfuse.com, Japan https://jp.cloud.langfuse.com, HIPAA https://hipaa.cloud.langfuse.com
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
 
 # Evaluation
-LANGSMITH_EVAL_DATASET_NAME=crag-eval-v1
-LANGSMITH_EVAL_PROJECT=crag-evals
+LANGFUSE_EVAL_DATASET_NAME=crag-eval-v1
 EVAL_FAITHFULNESS_THRESHOLD=0.75
 EVAL_ANSWER_RELEVANCY_THRESHOLD=0.75
 EVAL_CONTEXT_RECALL_THRESHOLD=0.65
@@ -471,12 +512,13 @@ psycopg-pool==3.2.*
 langgraph-checkpoint-postgres==2.0.*
 redis==5.2.*
 python-jose[cryptography]==3.3.*
-passlib[bcrypt]==1.7.*
+bcrypt>=4.0  # NOT passlib[bcrypt] — see Phase 3 note below
 alembic==1.14.*
 ragas==0.2.*
 pytest-asyncio==0.24.*
 httpx==0.27.*
 fakeredis==2.26.*
+langfuse==3.*
 ```
 
 ---
@@ -503,7 +545,7 @@ fakeredis==2.26.*
 5. Skip `alembic upgrade head` for initial setup — tables were already created in Supabase via `setup/db_setup.md`. Use Alembic only for **future schema changes** going forward.
 
 ### Phase 3 — Auth Layer (Day 2)
-1. `auth/password.py`: `passlib.context.CryptContext(schemes=["bcrypt"], deprecated="auto")`
+1. `auth/password.py`: hash with `bcrypt` directly (**not** `passlib.context.CryptContext`) — `passlib` 1.7.4 is unmaintained and incompatible with `bcrypt>=4.0`, which `chromadb` already requires. See `completed.md` Phase 3 notes.
 2. `auth/jwt.py`: `python-jose` encode/decode; `create_access_token`, `create_refresh_token`, `decode_token`
 3. `auth/dependencies.py`: `get_current_user` async dep (validates Bearer → revocation check → DB user load)
 4. Unit tests for auth (mocked DB + Redis; no LLM calls)
@@ -517,30 +559,32 @@ fakeredis==2.26.*
 1. Modify `graph.py`: extract `create_app(checkpointer)` factory; remove module-level compile and `draw_mermaid_png`
 2. Modify `main.py`: instantiate `MemorySaver()` locally; call `create_app()`
 3. Inline LangChain Hub prompt in `chains/generation.py`
-4. Verify: `python main.py` and `pytest chains/tests/ -m integration` both pass
+4. `observability/langfuse_client.py`: `get_langfuse_handler()` factory; wire it into `main.py`'s `app.stream(...)` call — see [Observability](#observability-langfuse). Doing this now (not deferred to Phase 10) means every phase after this one is already traced.
+5. Verify: `python main.py` and `pytest chains/tests/ -m integration` both pass, and the run shows up in the Langfuse dashboard
 
 ### Phase 6 — FastAPI Application (Day 3–5)
 1. `api/schemas/` — all Pydantic models
-2. `api/dependencies.py` — `get_db`, `get_redis`, `get_graph`, re-export `get_current_user`
-3. `api/routers/auth.py` — register, login, refresh, logout, me
-4. `api/routers/sessions.py` — CRUD with Redis-first read, DB fallback
-5. `api/routers/chat.py` — sync invoke + SSE stream; persist messages; update Redis caches
-6. `api/main.py` — lifespan, include routers, CORS, request-ID middleware
-7. Manual API smoke test:
+2. `db/crud/{users,sessions,messages}.py` — plain functions wrapping the SQLAlchemy queries routers need (e.g. `get_session(db, session_id, user_id)` doing the ownership check once instead of duplicating it in `sessions.py` and `chat.py`); routers call these instead of building queries inline
+3. `api/dependencies.py` — `get_db`, `get_redis`, `get_graph`, re-export `get_current_user`
+4. `api/routers/auth.py` — register, login, refresh, logout, me (uses `db/crud/users.py`)
+5. `api/routers/sessions.py` — CRUD with Redis-first read, DB fallback (uses `db/crud/sessions.py`)
+6. `api/routers/chat.py` — sync invoke + SSE stream; persist messages; update Redis caches (uses `db/crud/{sessions,messages}.py`)
+7. `api/main.py` — lifespan, include routers, CORS, request-ID middleware
+8. Manual API smoke test:
    ```bash
    uvicorn api.main:app --reload
    curl -X POST http://localhost:8000/auth/register -H "Content-Type: application/json" \
         -d '{"email":"a@b.com","username":"alice","password":"test1234"}'
    ```
-8. Integration tests using `httpx.AsyncClient` against a `crag_test` database
+9. Integration tests using `httpx.AsyncClient` against a `crag_test` database
 
 ### Phase 7 — Evaluation Suite (Day 5–6)
 1. Build 25-sample dataset in `eval/dataset.py` (derive ground_truth from Chroma or blog posts)
 2. `eval/metrics.py`: instantiate RAGAS metrics + thresholds dict
-3. `eval/langsmith_eval.py`: `create_or_get_dataset`, `run_target`, `build_ragas_evaluators`
+3. `eval/langfuse_eval.py`: `create_or_get_dataset`, `run_target`, `score_and_push` (see [Observability](#observability-langfuse))
 4. `eval/run_eval.py`: argparse CLI with threshold gate + markdown output
 5. Run baseline: `python -m eval.run_eval --experiment-name baseline-v1`
-6. Record baseline scores and LangSmith URL — these become regression thresholds for CI
+6. Record baseline scores and Langfuse dataset-run URL — these become regression thresholds for CI
 
 ### Phase 8 — Test Hardening (Day 6)
 1. Add `chains/tests/conftest.py` with fixtures for DB, Redis, HTTP client, authenticated user
@@ -559,6 +603,13 @@ fakeredis==2.26.*
 4. Rate limiting middleware (Redis INCR per user per minute bucket; reject at 60 req/min)
 5. `/health` endpoint with real `SELECT 1` DB check and Redis `PING`
 
+### Phase 10 — Observability (Langfuse)
+> Numbered last for doc/folder consistency only — the actual wiring happens in **Phase 5, step 4** above, as soon as `create_app()` exists. This phase entry exists so `completed.md`/`tests/`/`test_reports/` have a phase slot to track it against, matching every other phase in this plan.
+1. `observability/langfuse_client.py`: `get_langfuse_handler()` (done in Phase 5)
+2. Wire the handler into `api/routers/chat.py`'s sync-invoke and SSE-stream paths (Phase 6), with `langfuse.propagate_attributes(trace_name=..., user_id=..., session_id=...)` so traces are filterable per user/session
+3. Wire the handler into `eval/langfuse_eval.py` via `item.get_langchain_handler(...)` (Phase 7)
+4. Verify: run a few chat requests through the API, confirm traces appear in the Langfuse Cloud dashboard with correct user/session tags and per-node latency/cost breakdown
+
 ---
 
 ## Key Design Decisions
@@ -572,3 +623,5 @@ fakeredis==2.26.*
 | Keep sync nodes (no async conversion) | LangGraph `ainvoke` handles `run_in_executor` automatically; refactor risk not worth it |
 | `ZREMRANGEBYRANK 0 -6` for 5-session eviction | Keeps 5 highest-scored (most recent) members atomically |
 | Inline LangChain Hub prompt | Eliminates live network call at every import/cold start |
+| `bcrypt` directly, not `passlib` | `passlib` unmaintained since 2020, incompatible with `bcrypt>=4.0` which `chromadb` already requires |
+| Langfuse Cloud replaces LangSmith | Single observability tool for both request tracing and RAGAS eval scoring; avoids double-instrumentation |

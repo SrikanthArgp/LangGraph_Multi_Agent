@@ -1,0 +1,8 @@
+{
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportAttributeAccessIssue": "none"
+    },
+    "markdown-preview-enhanced.previewTheme": "github-dark.css",
+    "markdown-preview-enhanced.codeBlockTheme": "github-dark.css",
+    "markdown-preview-enhanced.mermaidTheme": "dark"
+}

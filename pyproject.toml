@@ -34,7 +34,11 @@ prod = [
     "redis>=5.2",
     # Auth
     "python-jose[cryptography]>=3.3",
-    "passlib[bcrypt]>=1.7",
+    # Hash passwords with bcrypt directly, not passlib: passlib 1.7.4 (unmaintained since
+    # 2020) is incompatible with bcrypt>=4.0 (removed __about__.__version__, and bcrypt 5.x
+    # raises instead of truncating on passlib's internal 72-byte self-test). chromadb already
+    # requires bcrypt>=4.0.1, so pinning bcrypt down for passlib isn't resolvable anyway.
+    "bcrypt>=4.0",
     # Structured logging
     "structlog>=24.0",
 ]
@@ -51,7 +55,11 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-markers = ["integration: marks tests that call real LLMs"]
+markers = [
+    "integration: marks tests that call real LLMs or external APIs",
+    "requires_db: marks tests that need a reachable Postgres instance",
+    "requires_redis: marks tests that need a reachable Redis instance",
+]
 
 [tool.uv]
 package = false

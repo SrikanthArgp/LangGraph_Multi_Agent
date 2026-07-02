@@ -1,0 +1,301 @@
+<title>Login flow — render check</title>
+<style>
+  :root {
+    --bg: #f3f4f7;
+    --surface: #ffffff;
+    --border: #dde1e8;
+    --text: #14171f;
+    --muted: #667085;
+    --client: #3a3f4b;
+    --fastapi: #05998b;
+    --fastapi-bg: #e6f6f4;
+    --postgres: #336791;
+    --postgres-bg: #e8eef4;
+    --module: #6e56cf;
+    --module-bg: #f0ecfb;
+    --line: #b7bcc7;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 2.5rem 1.5rem 3rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.75rem;
+  }
+
+  .intro {
+    max-width: 46rem;
+    text-align: center;
+  }
+
+  .intro .eyebrow {
+    font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fastapi);
+    margin: 0 0 0.4rem;
+  }
+
+  .intro h1 {
+    font-size: 1.4rem;
+    margin: 0 0 0.5rem;
+    text-wrap: balance;
+  }
+
+  .intro p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 56rem;
+  }
+
+  .node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.85rem 1.15rem;
+    box-shadow: 0 1px 2px rgba(20, 23, 31, 0.04);
+    text-align: center;
+    min-width: 11rem;
+  }
+
+  .node .kind {
+    font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.66rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    margin: 0 0 0.25rem;
+  }
+
+  .node .name {
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+
+  .node.client { border-top: 3px solid var(--client); }
+  .node.client .kind { color: var(--client); }
+
+  .node.hub {
+    border-top: 3px solid var(--fastapi);
+    background: var(--fastapi-bg);
+    min-width: 15rem;
+  }
+  .node.hub .kind { color: var(--fastapi); }
+
+  .node.pg { border-top: 3px solid var(--postgres); background: var(--postgres-bg); }
+  .node.pg .kind { color: var(--postgres); }
+
+  .node.mod { border-top: 3px solid var(--module); background: var(--module-bg); }
+  .node.mod .kind { color: var(--module); }
+
+  .connector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.5rem 0;
+  }
+
+  .connector .label {
+    font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    text-align: center;
+    max-width: 20rem;
+    line-height: 1.5;
+  }
+
+  .connector .arrow {
+    position: relative;
+    width: 2px;
+    height: 1.6rem;
+    background: var(--line);
+  }
+  .connector .arrow::before,
+  .connector .arrow::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid var(--line);
+    border-bottom: 2px solid var(--line);
+  }
+  .connector .arrow::before {
+    top: -4px;
+    transform: translateX(-50%) rotate(-135deg);
+  }
+  .connector .arrow::after {
+    bottom: -4px;
+    transform: translateX(-50%) rotate(45deg);
+  }
+
+  .branches {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.75rem;
+    width: 100%;
+    margin-top: 0.25rem;
+  }
+
+  .branch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .branch .harrow {
+    position: relative;
+    height: 2px;
+    width: 100%;
+    background: var(--line);
+    margin-top: 0.2rem;
+  }
+  .branch .harrow::before,
+  .branch .harrow::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    border-right: 2px solid var(--line);
+    border-top: 2px solid var(--line);
+  }
+  .branch .harrow::before {
+    left: -1px;
+    transform: translateY(-50%) rotate(-135deg);
+  }
+  .branch .harrow::after {
+    right: -1px;
+    transform: translateY(-50%) rotate(45deg);
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1.1rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  .legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .legend i {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 2px;
+    display: inline-block;
+  }
+
+  .footer-note {
+    max-width: 40rem;
+    text-align: center;
+    font-size: 0.82rem;
+    color: var(--muted);
+    line-height: 1.6;
+    border-top: 1px solid var(--border);
+    padding-top: 1.25rem;
+  }
+  .footer-note code {
+    font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+  }
+
+  @media (max-width: 640px) {
+    .branches { grid-template-columns: 1fr; gap: 1.4rem; }
+    .branch .harrow { display: none; }
+  }
+</style>
+
+<div class="intro">
+  <p class="eyebrow">Render check — not part of the docs</p>
+  <h1>Login flow, redrawn without Mermaid</h1>
+  <p>
+    This reproduces the "Login" diagram from <code>docs/auth-flow.md</code> using plain HTML/CSS
+    instead of a Mermaid code block. If boxes and arrows show up here, the content of the diagram
+    was never the problem — it's specifically the VS Code preview not invoking the Mermaid renderer.
+  </p>
+</div>
+
+<div class="diagram">
+  <div class="node client">
+    <p class="kind">Client</p>
+    <p class="name">Browser / API caller</p>
+  </div>
+
+  <div class="connector">
+    <div class="arrow"></div>
+    <p class="label">1 · POST /auth/login {email, password}<br>9 · 200 {access, refresh, ...} <em>or 401</em></p>
+  </div>
+
+  <div class="node hub">
+    <p class="kind">FastAPI Route</p>
+    <p class="name">api/routers/auth.py<br><span style="font-weight:400; color: var(--muted); font-size: 0.8rem;">(Phase 6 — not built yet)</span></p>
+  </div>
+
+  <div class="branches">
+    <div class="branch">
+      <div class="harrow"></div>
+      <p class="label">2 · SELECT WHERE email<br>3 · user row<br>6 · INSERT refresh_token<br>8 · row saved</p>
+      <div class="node pg">
+        <p class="kind">Postgres</p>
+        <p class="name">users, refresh_tokens</p>
+      </div>
+    </div>
+
+    <div class="branch">
+      <div class="harrow"></div>
+      <p class="label">4 · verify_password()<br>5 · True / False</p>
+      <div class="node mod">
+        <p class="kind">Python module</p>
+        <p class="name">auth/password.py</p>
+      </div>
+    </div>
+
+    <div class="branch">
+      <div class="harrow"></div>
+      <p class="label">7 · create_access/refresh_token()<br>&nbsp;&nbsp;&nbsp;access + refresh JWT</p>
+      <div class="node mod">
+        <p class="kind">Python module</p>
+        <p class="name">auth/jwt.py</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <span><i style="background: var(--client)"></i>Client</span>
+  <span><i style="background: var(--fastapi)"></i>FastAPI route (Phase 6)</span>
+  <span><i style="background: var(--postgres)"></i>Postgres</span>
+  <span><i style="background: var(--module)"></i>Built &amp; tested Python module</span>
+</div>
+
+<div class="footer-note">
+  If this renders but your VS&nbsp;code preview of <code>docs/auth-flow.md</code> still shows raw
+  <code>```mermaid</code> text, the Mermaid syntax isn't the issue — it's the extension/preview
+  wiring. To rule out syntax entirely, paste one of the fenced blocks from that file into
+  mermaid.live, which renders Mermaid with zero local setup.
+</div>

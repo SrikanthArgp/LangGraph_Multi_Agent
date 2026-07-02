@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Copy `.env.example` to `.env` and fill in your API keys:
 - `OPENAI_API_KEY` — used by all chains and embeddings
 - `TAVILY_API_KEY` — used by the web search node
-- `LANGCHAIN_API_KEY` / `LANGCHAIN_TRACING_V2` / `LANGCHAIN_PROJECT` — optional LangSmith tracing
+- `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` — agent observability (Langfuse Cloud); not yet wired into the graph, see Productionization Migration below
 
 Before running the graph for the first time, populate the Chroma vector store by uncommenting the `Chroma.from_documents(...)` block in `ingestion.py` and running it once. After the store is built, re-comment that block so subsequent runs use the persisted `.chroma/` directory.
 
@@ -82,3 +82,12 @@ Documents are loaded from three Lilian Weng blog posts (agents, prompt engineeri
 ### Memory / checkpointing (`graph.py`)
 
 The compiled graph uses `MemorySaver` (in-memory). Queries in `main.py` pass `thread_id` via `config={"configurable": {"thread_id": "..."}}` for conversation-level state isolation.
+
+## Productionization Migration (in progress)
+
+This repo is being turned into a production REST API — JWT auth, per-user sessions, Postgres + Redis persistence, RAGAS/Langfuse evaluation. The plan, current status, and reasoning behind every deviation from it (with the "why") live in two files — **read them before touching `db/`, `auth/`, `cache/`, or adding to the plan**:
+
+- `plan.md` — full target design: new folder structure, schema, API endpoints, phase-by-phase migration order (Phases 1–10)
+- `completed.md` — what's actually done vs. still pending, updated after every phase, including real issues hit along the way (e.g. Windows `ProactorEventLoop` incompatibility with psycopg async, `passlib`/`bcrypt` version conflict) and why each was resolved the way it was
+
+As of this writing: Phases 1–4 (Infrastructure, Database Layer, Auth Layer, Cache Layer) are complete and tested — see `test_reports/` (one report per phase, human-readable, functionality-first) for what's actually verified. `graph.py`/`main.py` are **still unchanged** — the `db/`, `auth/`, `cache/` packages exist and are tested standalone but are not yet wired into the graph or exposed via an API; that starts at Phase 5.
