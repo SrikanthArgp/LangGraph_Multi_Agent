@@ -5,14 +5,18 @@ description = "Corrective RAG multi-agent pipeline built with LangGraph"
 requires-python = ">=3.11"
 dependencies = [
     # Core CRAG graph
-    "langgraph>=0.4",
-    "langchain>=0.3",
-    "langchain-openai>=0.3",
-    "langchain-community>=0.3",
+    # Pinned to the pre-1.0 LangChain/LangGraph API this codebase targets
+    # (langchain.hub, langgraph.checkpoint.memory.MemorySaver, langchain.schema.Document, etc.)
+    "langgraph>=0.2,<0.3",
+    "langchain>=0.3,<0.4",
+    "langchain-openai>=0.2,<0.3",
+    "langchain-community>=0.3,<0.4",
+    "langchain-chroma>=0.1,<0.2",
     "langchainhub>=0.1",
-    "chromadb>=0.5",
+    "chromadb>=0.5,<0.6",
     "tavily-python>=0.5",
     "python-dotenv>=1.0",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +52,9 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = ["integration: marks tests that call real LLMs"]
+
+[tool.uv]
+package = false
 
 [build-system]
 requires = ["hatchling"]

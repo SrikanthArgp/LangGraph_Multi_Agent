@@ -1,4 +1,7 @@
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -9,7 +12,6 @@ from consts import GENERATE, GRADE_DOCUMENTS, RETRIEVE, WEBSEARCH
 from nodes import generate, grade_documents, retrieve, web_search
 from state import GraphState
 
-load_dotenv()
 memory = MemorySaver()
 
 

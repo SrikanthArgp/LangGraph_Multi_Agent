@@ -5,13 +5,16 @@ from pprint import pprint
 
 from graph import app
 
-question1 = "What are the types of agent memory?"
-inputs = {"question": question1}
+# question1 = "What are the types of agent memory?"
+# inputs = {"question": question1}
 
 # question = "What are the types of prompt engineering?"
 # inputs = {"question": question}
 
+question = "What is Harness engineering, why is it gaining traction?"
+inputs = {"question": question}
+
 for output in app.stream(inputs, config={"configurable": {"thread_id": "2"}}):
     for key, value in output.items():
         pprint(f"Finished running: {key}:")
-pprint(value["generation"])
+pprint(value["generation"]) # type: ignore
