@@ -1,0 +1,54 @@
+[project]
+name = "crag-multi-agent"
+version = "0.1.0"
+description = "Corrective RAG multi-agent pipeline built with LangGraph"
+requires-python = ">=3.11"
+dependencies = [
+    # Core CRAG graph
+    "langgraph>=0.4",
+    "langchain>=0.3",
+    "langchain-openai>=0.3",
+    "langchain-community>=0.3",
+    "langchainhub>=0.1",
+    "chromadb>=0.5",
+    "tavily-python>=0.5",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+prod = [
+    # FastAPI server
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    # PostgreSQL (two drivers — SQLAlchemy async + LangGraph AsyncPostgresSaver)
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    # Redis cache
+    "redis>=5.2",
+    # Auth
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    # Structured logging
+    "structlog>=24.0",
+]
+eval = [
+    "ragas>=0.2",
+    "langsmith>=0.1",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "fakeredis>=2.26",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["integration: marks tests that call real LLMs"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,7 +1,6 @@
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from chains.answer_grader import answer_grader
 from chains.hallucination_grader import hallucination_grader
@@ -11,7 +10,6 @@ from nodes import generate, grade_documents, retrieve, web_search
 from state import GraphState
 
 load_dotenv()
-memory = SqliteSaver.from_conn_string(":memory:")
 memory = MemorySaver()
 
 
@@ -56,7 +54,7 @@ def grade_generation_grounded_in_documents_and_question(state: GraphState) -> st
 def route_question(state: GraphState) -> str:
     print("---ROUTE QUESTION---")
     question = state["question"]
-    source: RouteQuery = question_router.invoke({"question": question})
+    source: RouteQuery = question_router.invoke({"question": question}) # type: ignore
     if source.datasource == WEBSEARCH:
         print("---ROUTE QUESTION TO WEB SEARCH---")
         return WEBSEARCH
@@ -72,7 +70,8 @@ workflow.add_node(GENERATE, generate)
 workflow.add_node(WEBSEARCH, web_search)
 
 
-workflow.set_conditional_entry_point(
+workflow.add_conditional_edges(
+    START,
     route_question,
     {
         WEBSEARCH: WEBSEARCH,
@@ -101,5 +100,3 @@ workflow.add_conditional_edges(
 
 
 app = workflow.compile(checkpointer=memory)
-
-app.get_graph().draw_mermaid_png(output_file_path="graph.png")
