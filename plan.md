@@ -461,24 +461,25 @@ app = create_app(MemorySaver())
 ```
 
 ### `AsyncPostgresSaver` lifecycle in `api/main.py`
+**Corrected during Phase 6 build** (verified against the installed `langgraph-checkpoint-postgres`, not assumed): `AsyncPostgresSaver` is **not** an async context manager when constructed directly - `async with AsyncPostgresSaver(pool) as saver:` raises `TypeError`. That pattern belongs to `AsyncPostgresSaver.from_conn_string()`'s `@asynccontextmanager` factory, not the plain constructor. Also, the pool needs `kwargs={"autocommit": True}` - `saver.setup()`'s migrations use `CREATE INDEX CONCURRENTLY`, which Postgres refuses to run inside a transaction block. And `app.state.db_engine` reuses `db/base.py`'s existing engine rather than opening a second pool against the same database (the snippet below originally created its own via `create_async_engine(...)`, which would sit unused - everything already queries through `db/base.py`'s `async_session_factory`).
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pg_pool = AsyncConnectionPool(
-        conninfo=settings.DATABASE_URL_PSYCOPG, min_size=2, max_size=10, open=False
+        conninfo=settings.DATABASE_URL_PSYCOPG, min_size=2, max_size=10, open=False,
+        kwargs={"autocommit": True},
     )
     await app.state.pg_pool.open()
-    async with AsyncPostgresSaver(app.state.pg_pool) as saver:
-        await saver.setup()   # creates checkpoint tables if not exist (idempotent)
-    app.state.db_engine = create_async_engine(settings.DATABASE_URL)
+    saver = AsyncPostgresSaver(app.state.pg_pool)
+    await saver.setup()   # creates checkpoint tables if not exist (idempotent)
+    app.state.db_engine = db_engine  # from db.base import engine as db_engine
     app.state.redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     yield
     await app.state.pg_pool.close()
-    await app.state.db_engine.dispose()
     await app.state.redis.aclose()
 ```
 
-`get_graph` dependency creates `AsyncPostgresSaver(request.app.state.pg_pool)` per request (cheap — pool is the singleton).
+`get_graph` dependency creates `AsyncPostgresSaver(request.app.state.pg_pool)` per request (cheap — pool is the singleton, plain construction not `async with`).
 
 ---
 
@@ -740,23 +741,25 @@ tenacity==9.*
 6. Testing: `pytest chains/tests/` still passes (7/7) against the refactored `create_app()` factory and inlined prompt — regression check that extracting the factory and adding retry/degrade logic didn't change happy-path chain/node behavior. **Failure-path** (`tests/phase5_graph/test_resilience.py`, 8 tests): patches each `_call_*`/`_grade_*`/`_route_question` tenacity-wrapped helper to always raise (retries exhausted) and asserts the documented degrade — `retrieve`/`web_search` degrade to empty documents/results, `grade_documents` degrades to `web_search=True`, `route_question` defaults to `websearch`, both graders in `grade_generation_grounded_in_documents_and_question` default to `"useful"` — except `generate()`, which is asserted to propagate the exception.
 7. Verify: `python main.py` runs end-to-end — both the direct-to-websearch path and the RAG path (including the RAG→partial-relevance→websearch fallback mid-graph) were run manually and produced correct answers. Langfuse trace confirmed live via the public API once real keys were added (see retrofit note above).
 
-### Phase 6 — FastAPI Application (Day 3–5)
+### Phase 6 — FastAPI Application (Day 3–5) — Complete
+> Built against the **live Supabase DB** (no separate `crag_test` database exists yet - that's Phase 10's job; these tests use the same rolled-back-SAVEPOINT pattern as `tests/phase2_database/conftest.py` instead). Four real bugs were found and fixed only by actually running the app, not just importing it - see `completed.md` for full detail: (1) `uvicorn api.main:app` doesn't work on Windows at all with this app - modern uvicorn hardcodes `ProactorEventLoop` for its "asyncio"/"auto" loop regardless of `asyncio.set_event_loop_policy()`, so a dedicated `run_api.py` supplies a custom loop factory instead; (2) `AsyncPostgresSaver` isn't an async context manager in the installed `langgraph-checkpoint-postgres` version - this plan's original `async with AsyncPostgresSaver(...) as saver:` snippets (here and in [LangGraph Integration](#langgraph-integration)) were wrong, fixed to plain construction; (3) `AsyncConnectionPool` needs `kwargs={"autocommit": True}` - `AsyncPostgresSaver.setup()`'s migrations use `CREATE INDEX CONCURRENTLY`, which Postgres refuses inside a transaction block; (4) a Redis session-cache consistency bug where a message-less session was DB-fallback-visible but invisible on a cache hit (fixed by always scoring the ZSET write with `last_message_at or created_at`, and by having `chat.py` refresh the session cache after every message instead of relying on the next listing call to repopulate it).
 1. `config.py` — `Settings`/`get_settings()` (pydantic-settings); everything below reads config through it, not `os.getenv`
 2. `api/schemas/` — all Pydantic models
-3. `db/crud/{users,sessions,messages}.py` — plain functions wrapping the SQLAlchemy queries routers need (e.g. `get_session(db, session_id, user_id)` doing the ownership check once instead of duplicating it in `sessions.py` and `chat.py`); routers call these instead of building queries inline
-4. `api/dependencies.py` — `get_db`, `get_redis`, `get_graph`, re-export `get_current_user`. `get_db`/`get_redis` catch connection errors and raise a `503 Service Unavailable` with a clear `detail` instead of letting a raw `SQLAlchemyError`/`redis.exceptions.*` surface as an opaque 500 (see [Resilience & Crash Prevention](#resilience--crash-prevention-backend--frontend))
+3. `db/crud/{users,sessions,messages}.py` — plain functions wrapping the SQLAlchemy queries routers need (e.g. `get_session(db, session_id, user_id)` doing the ownership check once instead of duplicating it in `sessions.py` and `chat.py`); routers call these instead of building queries inline. Also added `db/crud/refresh_tokens.py` (not in this plan's original file tree) - the Auth Flow section's refresh/logout semantics need DB-backed refresh-token lookup/revocation, which has to live somewhere
+4. `api/dependencies.py` — `get_db`, `get_redis`, `get_graph`, re-export `get_current_user`, plus `enforce_auth_rate_limit` (not originally listed here, but it's a shared dependency like the others). `get_db` catches `OperationalError` and raises a `503`. `get_redis` deliberately does **not** catch connection errors - see the amended "Fallback on Redis unavailability" note; every real caller already has a fallback (sessions/chat catch `CacheUnavailableError`) or fails open (auth rate limiter, Phase 3 revocation check), so a blanket 503 here would defeat both. `api/main.py` also wires `app.dependency_overrides[get_db_session] = get_db` / `[get_redis_client] = get_redis`, completing the Phase 3 design note that `get_current_user`'s own providers were built to be overridden here, not rebuilt - this was missed initially and caught only once tests started asserting on shared-session behavior
 5. `api/routers/auth.py` — register, login, refresh, logout, me (uses `db/crud/users.py`); login and register are wrapped with the IP-based auth rate limiter (see [Configuration, Error Handling & Auth Rate Limiting](#configuration-error-handling--auth-rate-limiting))
 6. `api/routers/sessions.py` — CRUD with Redis-first read, DB fallback on both cache-miss and Redis connection error (uses `db/crud/sessions.py`)
-7. `api/routers/chat.py` — sync invoke + SSE stream; persist messages; update Redis caches (uses `db/crud/{sessions,messages}.py`)
+7. `api/routers/chat.py` — sync invoke + SSE stream; persist messages; update Redis caches (uses `db/crud/{sessions,messages}.py`). The SSE stream is contract-complete (`token`/`done`/`error` events) but **not token-by-token** - `nodes/generate.py`'s LLM call is a synchronous, tenacity-wrapped `.invoke()` inside a plain node function, so there's no per-token event source to relay yet; the endpoint runs the graph to completion, then emits the full answer as one `token` event. Real incremental streaming needs `generate()` reworked to stream, tracked as follow-up, not required for this phase's router-only scope
 8. `api/error_handlers.py` — global `HTTPException`/`Exception` handlers, consistent JSON error envelope
 9. `api/main.py` — lifespan, mount routers under `/v1`, register error handlers, CORS, request-ID middleware
-10. Manual API smoke test:
+10. Manual API smoke test (via `run_api.py`, not `uvicorn api.main:app` directly - see the Windows note above):
     ```bash
-    uvicorn api.main:app --reload
+    python run_api.py
     curl -X POST http://localhost:8000/v1/auth/register -H "Content-Type: application/json" \
          -d '{"email":"a@b.com","username":"alice","password":"test1234"}'
     ```
-11. Testing: integration tests using `httpx.AsyncClient` against a `crag_test` database — register/login/refresh/logout/me, session CRUD with ownership enforcement (user A can't read/rename/delete user B's session), chat sync-invoke and SSE-stream happy paths, and the IP-based auth rate limiter actually returning 429 past the threshold. **Failure-path**: point `get_db`/`get_redis` at an unreachable host in a test and assert a clean `503`, not a stack trace; force a node exception through `get_graph` (Phase 5's retry/degrade already handles the external-dependency case, so this specifically covers "something else still raised") and assert the Phase 6 global handler returns the consistent `{"detail": ...}` shape, not a leaked traceback
+    Actually run end-to-end against the live Supabase DB and real Redis container: register → login → `/me` → create session → send a chat message (full CRAG graph through a real `AsyncPostgresSaver`) → list/rename/archive sessions (including the Redis cache-hit path) → SSE stream → refresh-token rotation + old-token rejection → logout + post-logout revocation → cross-user ownership 404s → duplicate-register 409 → bad-login 401 → validation 422. No errors in the server log across the whole run.
+11. Testing (`tests/phase6_api/`, 24 tests): `httpx.AsyncClient` + `ASGITransport` (with `raise_app_exceptions=False` - see the note in `tests/phase6_api/conftest.py` about why the default `True` hides the exact 500-envelope behavior these tests need to assert on) against the live DB via the same SAVEPOINT-rollback pattern as Phase 2, plus `fakeredis` and a `FakeGraph`/`FailingGraph` test double for the graph dependency. Covers register/login/refresh/logout/me, session CRUD with cross-user ownership enforcement, chat sync-invoke and SSE-stream happy paths (fast, no real LLM calls) plus one `@pytest.mark.integration` test with the real graph, and the IP-based auth rate limiter returning `429` past the threshold. **Failure-path**: `get_db()` unit-tested directly against an unreachable-host engine, injecting the resulting `OperationalError` via `gen.athrow(...)` (mirroring how FastAPI actually tears down a yield-dependency on an endpoint exception) and asserting `503`; a non-`OperationalError`, non-`HTTPException` failure in a dependency asserted to produce the generic handler's `{"detail": "internal server error"}` envelope, not a leaked traceback; the CRAG-graph-fails path asserted to return `502` (sync) / an `{"type": "error"}` SSE frame (stream) rather than crashing the request.
 
 ### Phase 7 — Next.js Frontend: Auth (Day 5–6)
 Split from the chat UI (Phase 8) because they're genuinely different problems: this phase is entirely about getting the token lifecycle right (login, register, silent refresh, logout, route protection) with nothing to visually show for it beyond forms — worth its own phase and its own manual test pass before any chat UI complexity gets layered on top. Both together were "Phase 7 — Next.js Frontend" before this split. Separate Next.js project (own `package.json`), App Router + TypeScript + Tailwind — a `frontend/` subdirectory of this repo, not part of the Python project. Built right after the API exists and is smoke-tested — nothing in Phases 9–14 changes the API contract, so building the UI here (instead of last) surfaces real contract problems while they're still cheap to fix.
