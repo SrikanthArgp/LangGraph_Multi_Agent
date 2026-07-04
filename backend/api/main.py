@@ -68,7 +68,17 @@ async def lifespan(app: FastAPI):
     # the engine that's actually queried.
     app.state.db_engine = db_engine
 
-    app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    # socket_connect_timeout/socket_timeout: every caller of this client already treats
+    # RedisError as fail-open/degrade (Phase 3's revocation check, Phase 4's
+    # CacheUnavailableError) - without an explicit timeout, redis-py falls back to the OS's
+    # TCP connect timeout (10s+), so "fail open" was technically true but took 10+ seconds
+    # per request while Redis was down. 2s keeps the degrade path fast, not just eventual.
+    app.state.redis = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
 
     yield
 

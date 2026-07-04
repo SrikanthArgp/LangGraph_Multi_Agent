@@ -26,7 +26,15 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def get_redis_client() -> aioredis.Redis:
-    return aioredis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    # Same fast-fail timeouts as api/main.py's app.state.redis - this default provider is
+    # normally replaced via app.dependency_overrides (see api/main.py), but should degrade
+    # just as fast as the real one on the rare path where it isn't.
+    return aioredis.from_url(
+        os.environ["REDIS_URL"],
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
 
 
 async def get_current_user(
