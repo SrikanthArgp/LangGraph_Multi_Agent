@@ -2,7 +2,9 @@
 
 import { ErrorFallback } from "@/components/ErrorFallback";
 
-export default function GlobalErrorBoundary({
+// Route-level boundary: app/chat/layout.tsx renders SessionSidebar as a sibling of
+// this route segment's slot, so a crash caught here doesn't take the sidebar down.
+export default function ChatSessionError({
   error,
   reset,
 }: {

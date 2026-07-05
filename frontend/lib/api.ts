@@ -66,11 +66,14 @@ export interface ApiFetchOptions {
   auth?: boolean;
 }
 
-export async function apiFetch<T>(
+// Shared by apiFetch (JSON) and lib/sse.ts (raw streaming body) - both need the same
+// Authorization-header-plus-single-refresh-then-retry-on-401 behavior, just different
+// handling of the response body afterwards.
+export async function fetchWithAuth(
   path: string,
   init: RequestInit = {},
   options: ApiFetchOptions = {},
-): Promise<T> {
+): Promise<Response> {
   const useAuth = options.auth !== false;
 
   let response = await rawFetch(path, init, useAuth ? currentAccessToken : null);
@@ -81,6 +84,16 @@ export async function apiFetch<T>(
       response = await rawFetch(path, init, newToken);
     }
   }
+
+  return response;
+}
+
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit = {},
+  options: ApiFetchOptions = {},
+): Promise<T> {
+  const response = await fetchWithAuth(path, init, options);
 
   if (!response.ok) {
     const body = await parseBodySafely(response);
