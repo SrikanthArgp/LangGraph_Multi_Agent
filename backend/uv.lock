@@ -630,7 +630,6 @@ dev = [
     { name = "pytest-asyncio" },
 ]
 eval = [
-    { name = "langsmith" },
     { name = "ragas" },
 ]
 prod = [
@@ -664,10 +663,9 @@ requires-dist = [
     { name = "langchain-community", specifier = ">=0.3,<0.4" },
     { name = "langchain-openai", specifier = ">=0.2,<0.3" },
     { name = "langchainhub", specifier = ">=0.1" },
-    { name = "langfuse", specifier = ">=3.0" },
+    { name = "langfuse", specifier = ">=4.0,<5" },
     { name = "langgraph", specifier = ">=0.2,<0.3" },
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'prod'", specifier = ">=2.0" },
-    { name = "langsmith", marker = "extra == 'eval'", specifier = ">=0.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'prod'", specifier = ">=3.2" },
     { name = "psycopg-pool", marker = "extra == 'prod'", specifier = ">=3.2" },
     { name = "pydantic-settings", marker = "extra == 'prod'", specifier = ">=2.0" },
@@ -675,7 +673,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-jose", extras = ["cryptography"], marker = "extra == 'prod'", specifier = ">=3.3" },
-    { name = "ragas", marker = "extra == 'eval'", specifier = ">=0.2" },
+    { name = "ragas", marker = "extra == 'eval'", specifier = "==0.4.*" },
     { name = "redis", marker = "extra == 'prod'", specifier = ">=5.2" },
     { name = "sqlalchemy", marker = "extra == 'prod'", specifier = ">=2.0" },
     { name = "structlog", marker = "extra == 'prod'", specifier = ">=24.0" },

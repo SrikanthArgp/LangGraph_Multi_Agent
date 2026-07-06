@@ -17,6 +17,6 @@ def redis_client():
 
 @pytest.fixture(scope="session")
 def chroma_retriever():
-    from ingestion import retriever
+    from multi_agent.ingestion import retriever
 
     return retriever

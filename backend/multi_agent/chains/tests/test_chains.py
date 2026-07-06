@@ -1,5 +1,6 @@
 from pprint import pprint
 
+import pytest
 from dotenv import load_dotenv
 
 
@@ -10,6 +11,8 @@ from multi_agent.chains.hallucination_grader import GradeHallucinations, halluci
 from multi_agent.chains.retrieval_grader import GradeDocuments, retrieval_grader
 from multi_agent.chains.router import RouteQuery, question_router
 from multi_agent.ingestion import retriever
+
+pytestmark = pytest.mark.integration
 
 
 def test_generation_chain() -> None:

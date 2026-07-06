@@ -1,9 +1,12 @@
 import asyncio
 import os
 import sys
+from collections.abc import AsyncGenerator
 
+import fakeredis
 import pytest
 from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import AsyncSession
 
 load_dotenv()
 
@@ -15,6 +18,36 @@ if sys.platform == "win32":
 def _skip_if_missing(var_name: str) -> None:
     if not os.environ.get(var_name):
         pytest.skip(f"{var_name} not set in .env — skipping check that needs it")
+
+
+@pytest.fixture
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Real Postgres session wrapped in a rolled-back SAVEPOINT, so tests can write real
+    rows to the shared dev DB without leaving anything behind. `session.commit()` inside
+    a test/request only releases the SAVEPOINT (still inside the outer transaction this
+    fixture opened), so nothing here is durable past the test regardless of what the
+    code under test does.
+    """
+    _skip_if_missing("DATABASE_URL")
+    from db.base import engine
+
+    async with engine.connect() as conn:
+        await conn.begin()
+        session = AsyncSession(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            await conn.rollback()
+
+
+@pytest.fixture
+async def fake_redis() -> AsyncGenerator[fakeredis.aioredis.FakeRedis, None]:
+    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    yield client
+    await client.aclose()
 
 
 @pytest.fixture(scope="session")

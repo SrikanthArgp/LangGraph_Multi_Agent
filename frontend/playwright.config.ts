@@ -1,9 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// These tests hit the real FastAPI backend (register/login/etc.), not a mock - `webServer`
-// below only starts the Next.js dev server. Run `python run_api.py` from `backend/`
-// separately first (see CLAUDE.md). Fully automating both together is Phase 11's job
-// (plan.md: "npm run test:e2e (spins up the dev server + backend)"), not this phase's.
+// These tests hit the real FastAPI backend (register/login/etc.), not a mock. `webServer`
+// below starts both the Next.js dev server and the backend (`uv run python run_api.py`, so
+// it picks up backend/.venv without requiring it to be pre-activated) - per Phase 11
+// (plan.md: "npm run test:e2e (spins up the dev server + backend)"). `reuseExistingServer`
+// still lets a manually-started backend (CLAUDE.md's documented `python run_api.py`) be
+// reused locally instead of spawning a second one on the same port.
 export default defineConfig({
   testDir: "./e2e",
   // Serial, not parallel: every test mutates the same real Supabase DB through one shared
@@ -25,10 +27,19 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  webServer: {
-    command: "npm run dev",
-    url: "http://localhost:3000",
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  },
+  webServer: [
+    {
+      command: "uv run python run_api.py",
+      cwd: "../backend",
+      url: "http://localhost:8000/health",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+    {
+      command: "npm run dev",
+      url: "http://localhost:3000",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+  ],
 });

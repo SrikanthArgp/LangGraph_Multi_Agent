@@ -1,4 +1,3 @@
-import os
 from collections.abc import AsyncGenerator
 
 import fakeredis
@@ -9,39 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.dependencies import get_db, get_graph, get_redis
 from api.main import create_app
 from auth.dependencies import get_db_session, get_redis_client
-from db.base import engine
 
-
-def _skip_if_missing(var_name: str) -> None:
-    if not os.environ.get(var_name):
-        pytest.skip(f"{var_name} not set in .env — skipping check that needs it")
-
-
-@pytest.fixture
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Same rolled-back-SAVEPOINT pattern as tests/phase2_database/conftest.py - lets these
-    tests write real rows to the shared dev DB without leaving anything behind. `session.commit()`
-    inside a request only releases the SAVEPOINT (still inside the outer transaction this fixture
-    opened), so nothing here is durable past the test regardless of what a route handler does.
-    """
-    _skip_if_missing("DATABASE_URL")
-    async with engine.connect() as conn:
-        await conn.begin()
-        session = AsyncSession(
-            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
-        )
-        try:
-            yield session
-        finally:
-            await session.close()
-            await conn.rollback()
-
-
-@pytest.fixture
-async def redis_client() -> AsyncGenerator[fakeredis.aioredis.FakeRedis, None]:
-    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    yield client
-    await client.aclose()
+# db_session and fake_redis fixtures come from tests/conftest.py — shared across phases.
 
 
 class FakeGraph:
@@ -71,14 +39,14 @@ def fake_graph() -> FakeGraph:
 
 
 @pytest.fixture
-async def app(db_session: AsyncSession, redis_client: fakeredis.aioredis.FakeRedis, fake_graph: FakeGraph):
+async def app(db_session: AsyncSession, fake_redis: fakeredis.aioredis.FakeRedis, fake_graph: FakeGraph):
     application = create_app()
 
     async def _get_db():
         yield db_session
 
     async def _get_redis():
-        return redis_client
+        return fake_redis
 
     async def _get_graph():
         yield fake_graph
