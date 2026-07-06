@@ -4,11 +4,18 @@ import uuid
 from collections.abc import AsyncGenerator
 
 import redis.asyncio as aioredis
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_current_user, get_db, get_graph, get_redis
+from api.dependencies import (
+    enforce_general_rate_limit,
+    get_current_user,
+    get_db,
+    get_graph,
+    get_redis,
+)
 from api.routers.sessions import cache_session
 from api.schemas.chat import ChatRequest, ChatResponse, MessageResponse, MessagesListResponse
 from cache.exceptions import CacheUnavailableError
@@ -20,12 +27,15 @@ from multi_agent.observability.langfuse_client import get_langfuse_handler
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/sessions", tags=["chat"])
+router = APIRouter(
+    prefix="/sessions", tags=["chat"], dependencies=[Depends(enforce_general_rate_limit)]
+)
 
 
 async def _get_owned_session_or_404(
     db: AsyncSession, session_id: uuid.UUID, user_id: uuid.UUID
 ) -> ChatSession:
+    structlog.contextvars.bind_contextvars(session_id=str(session_id))
     session = await sessions_crud.get_session(db, session_id, user_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")

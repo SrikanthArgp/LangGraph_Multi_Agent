@@ -35,8 +35,11 @@ class Settings(BaseSettings):
     app_port: int = 8000
     cors_origins: str = "http://localhost:3000"
 
-    # Auth rate limiting (separate, stricter bucket from Phase 11's general per-user limiter)
+    # Auth rate limiting (separate, stricter, IP-keyed bucket from Phase 12's general per-user limiter)
     rate_limit_auth_per_minute: int = 10
+
+    # General per-user rate limiting (Phase 12), applied to authenticated sessions/chat routes
+    rate_limit_general_per_minute: int = 60
 
     @property
     def cors_origins_list(self) -> list[str]:

@@ -19,19 +19,24 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, Request
+import structlog
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
+from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db, get_redis
 from api.error_handlers import register_error_handlers
+from api.logging_config import configure_logging
 from api.routers import auth, chat, sessions
 from auth.dependencies import get_db_session, get_redis_client
 from config import get_settings
 from db.base import engine as db_engine
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -101,7 +106,18 @@ def create_app() -> FastAPI:
     async def request_id_middleware(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
-        response = await call_next(request)
+        # Bound via contextvars (not passed explicitly to every logger call) so every log
+        # line emitted anywhere during this request - including plain stdlib `logger.warning(...)`
+        # calls scattered across api/dependencies.py, auth/dependencies.py, cache/*, etc. -
+        # picks it up automatically through api/logging_config.py's merge_contextvars
+        # processor. Cleared in `finally` since contextvars persist across awaits within the
+        # same task otherwise, which would leak into whatever runs after this middleware
+        # returns on a reused task.
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            structlog.contextvars.clear_contextvars()
         response.headers["X-Request-ID"] = request_id
         return response
 
@@ -120,8 +136,25 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix="/v1")
 
     @app.get("/health")
-    async def health() -> dict:
-        return {"status": "ok"}
+    async def health(
+        db: AsyncSession = Depends(get_db), redis: aioredis.Redis = Depends(get_redis)
+    ) -> dict:
+        """Postgres is a hard dependency - every route needs it, so a failure here is left
+        to propagate into get_db's own OperationalError handling (api/dependencies.py),
+        which raises the same 503 every other route would get. Redis is fail-open everywhere
+        else in this app (Phase 3's revocation check, Phase 4's cache layer, Phase 6's auth
+        rate limiter), so its outage alone doesn't make the service unhealthy - reported as
+        "degraded" (still 200), not a failure.
+        """
+        await db.execute(text("SELECT 1"))
+
+        try:
+            await redis.ping()
+            redis_ok = True
+        except RedisError:
+            redis_ok = False
+
+        return {"status": "ok" if redis_ok else "degraded", "db": True, "redis": redis_ok}
 
     return app
 

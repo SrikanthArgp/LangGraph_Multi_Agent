@@ -6,7 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from api.dependencies import get_graph
 from multi_agent.graph import create_app
-from tests.phase6_api.conftest import FailingGraph, FakeGraph
+from tests.conftest import FailingGraph, FakeGraph
 
 pytestmark = pytest.mark.requires_db
 

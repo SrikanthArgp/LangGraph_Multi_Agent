@@ -2,10 +2,11 @@ import uuid
 from datetime import datetime
 
 import redis.asyncio as aioredis
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_current_user, get_db, get_redis
+from api.dependencies import enforce_general_rate_limit, get_current_user, get_db, get_redis
 from api.schemas.session import SessionCreate, SessionListResponse, SessionPatch, SessionResponse
 from cache.exceptions import CacheUnavailableError
 from cache.sessions import (
@@ -17,7 +18,9 @@ from cache.sessions import (
 from db.crud import sessions as sessions_crud
 from db.models import ChatSession, User
 
-router = APIRouter(prefix="/sessions", tags=["sessions"])
+router = APIRouter(
+    prefix="/sessions", tags=["sessions"], dependencies=[Depends(enforce_general_rate_limit)]
+)
 
 
 def _to_response(session: ChatSession) -> SessionResponse:
@@ -133,6 +136,7 @@ async def create_session(
 async def _get_owned_session_or_404(
     db: AsyncSession, session_id: uuid.UUID, user_id: uuid.UUID
 ) -> ChatSession:
+    structlog.contextvars.bind_contextvars(session_id=str(session_id))
     session = await sessions_crud.get_session(db, session_id, user_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")

@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncGenerator
 
 import redis.asyncio as aioredis
+import structlog
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
@@ -75,4 +76,5 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
 
+    structlog.contextvars.bind_contextvars(user_id=str(user.id))
     return user

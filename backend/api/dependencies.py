@@ -9,13 +9,21 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user
-from config import get_settings
+from config import  get_settings
 from db.base import async_session_factory
+from db.models import User
 from multi_agent.graph import create_app
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["get_db", "get_redis", "get_graph", "get_current_user", "enforce_auth_rate_limit"]
+__all__ = [
+    "get_db",
+    "get_redis",
+    "get_graph",
+    "get_current_user",
+    "enforce_auth_rate_limit",
+    "enforce_general_rate_limit",
+]
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -68,8 +76,8 @@ async def enforce_auth_rate_limit(
     request: Request, redis: aioredis.Redis = Depends(get_redis)
 ) -> None:
     """IP-keyed rate limit for /v1/auth/login and /v1/auth/register - these run before any
-    identity exists, so they can't use a per-user bucket (that's Phase 11's job for
-    authenticated endpoints). Redis INCR-with-TTL bucket, window resets every 60s.
+    identity exists, so they can't use a per-user bucket (that's enforce_general_rate_limit's
+    job, for authenticated endpoints). Redis INCR-with-TTL bucket, window resets every 60s.
 
     Fails open on a Redis outage (logs a warning, lets the request through) rather than 503ing
     the whole auth flow over a transient cache blip - same reasoning as the Phase 3 revocation
@@ -86,6 +94,35 @@ async def enforce_auth_rate_limit(
         return
 
     if count > get_settings().rate_limit_auth_per_minute:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests, try again later",
+        )
+
+
+async def enforce_general_rate_limit(
+    current_user: User = Depends(get_current_user), redis: aioredis.Redis = Depends(get_redis)
+) -> None:
+    """User-keyed rate limit (Phase 12) for authenticated endpoints (sessions/chat routers) -
+    unlike enforce_auth_rate_limit, identity already exists here via get_current_user, so this
+    buckets per user rather than per IP (avoids one shared office/NAT IP tripping the limit for
+    every user behind it). Same Redis INCR-with-TTL pattern, same 60s window, same fail-open
+    behavior on a Redis outage as every other Redis-dependent check in this app.
+
+    Depends(get_current_user) here and the route's own Depends(get_current_user) resolve to
+    the same cached call within a request (FastAPI dependency caching, default use_cache=True)
+    - this doesn't add a second DB lookup.
+    """
+    key = f"ratelimit:general:{current_user.id}"
+    try:
+        count = await redis.incr(key)
+        if count == 1:
+            await redis.expire(key, 60)
+    except RedisError:
+        logger.warning("general_rate_limit_unavailable", extra={"user_id": str(current_user.id)})
+        return
+
+    if count > get_settings().rate_limit_general_per_minute:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests, try again later",
