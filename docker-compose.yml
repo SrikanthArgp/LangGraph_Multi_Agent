@@ -1,0 +1,56 @@
+services:
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    # backend/.env — not root .env, since backend/ is its own project root (see CLAUDE.md).
+    env_file: backend/.env
+    environment:
+      # Overrides backend/.env's REDIS_URL=redis://localhost:6379/0: container-to-container
+      # traffic must use the compose service DNS name, not localhost. Postgres (Supabase)
+      # needs no such override — it's already a remote host either way.
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8000:8000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Bind-mount so the persisted Chroma collection survives image rebuilds — re-ingesting
+      # on every `docker compose up --build` isn't required.
+      - ./backend/multi_agent/.chroma:/app/multi_agent/.chroma
+    healthcheck:
+      # python:3.12-slim has no curl; urllib avoids adding a package just for this.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the browser bundle at build time (see frontend/Dockerfile) — must stay a
+        # host-reachable URL, since it's the browser (not this container) that calls it, and
+        # the browser cannot resolve the compose network's `backend` DNS name.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/v1
+    ports: ["3000:3000"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # node:20-slim has no curl either; a one-line Node http request instead.
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

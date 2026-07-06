@@ -99,9 +99,11 @@ Multi-Agent/
 ├── requirements.txt               # EXTENDED
 ├── .env                           # EXTENDED
 ├── .env.example                   # UPDATED
-├── Dockerfile                      # NEW (Phase 10): python:3.12-slim, uvicorn CMD — backend image; gains the Lambda Web Adapter layer in Phase 16
+├── Dockerfile                      # NEW (Phase 10): python:3.12-slim, uvicorn CMD — backend image, build context is this directory (backend/) itself, not the repo root; gains the Lambda Web Adapter layer in Phase 16
+├── .dockerignore                    # NEW (Phase 10): .venv, .chroma, __pycache__, .env (paths relative to backend/, matching the Dockerfile's context)
+│
+│   (everything below this line is at the true repo root, one level up from this backend/ tree — see CLAUDE.md's note that this whole tree predates the backend/ restructure)
 ├── docker-compose.yml               # NEW (Phase 10): backend + frontend + redis services (Postgres stays Supabase, not containerized)
-├── .dockerignore                    # NEW (Phase 10): .venv, .chroma, __pycache__, .env
 ├── frontend/                       # NEW (Phases 7–8): separate Next.js app (own package.json) — see Phase 7 (auth) and Phase 8 (chat UI) for full tree; gets its own Dockerfile in Phase 10, static-exported to S3 in Phase 16
 └── infra/                           # NEW (Phase 16–17): Terraform root — providers, S3+DynamoDB remote state, Lambda/API Gateway/CloudFront resources (Phase 16), ECS/ALB resources added in Phase 17
 ```
@@ -839,28 +841,38 @@ Pins corrected above (`ragas==0.4.*`, `langfuse==4.*`) and in `backend/pyproject
 
 ### Phase 10 — Dockerization (Local Docker Desktop) (Day 8–9)
 **Decision (2026-07-03):** containerize the whole stack — backend, frontend, and Redis — so the app runs with one command on local Docker Desktop, as a deliberate checkpoint before any future enterprise-grade deployment pass (see [Deferred to a Future Enterprise-Grade Pass](#deferred-to-a-future-enterprise-grade-pass)). Postgres stays on Supabase, not containerized — it's already a managed connection string, and running a second local Postgres would just create a schema-drift risk against the real `setup/db_setup.md`-provisioned tables. This absorbs and extends what used to be Phase 11 steps 2–3 (backend `Dockerfile` + `docker-compose.yml`), now split out into its own phase and given a matching frontend image so both halves of the app are containerized together, not just the API.
-1. `Dockerfile` (repo root, backend) — `python:3.12-slim`, installs via `uv`, `CMD ["python", "run_api.py"]` (not `uvicorn api.main:app` directly — same Windows-loop-factory reasoning doesn't apply inside the Linux container, but keeping the entrypoint identical to local dev avoids a second code path to maintain)
+1. `backend/Dockerfile` — `python:3.12-slim`, installs via `uv`, `CMD ["python", "run_api.py"]` (not `uvicorn api.main:app` directly — same Windows-loop-factory reasoning doesn't apply inside the Linux container, but keeping the entrypoint identical to local dev avoids a second code path to maintain). Build context is `backend/` itself, not the repo root — this image never needs anything from outside `backend/`, so there's no reason for it to build from further up the tree (corrected from an earlier draft that put it at the repo root for no functional reason)
 2. `frontend/Dockerfile` — multi-stage Next.js build: `node:20-slim` builder stage (`npm ci && npm run build`) → slim runtime stage copying `.next/standalone` output (`next.config.js` needs `output: "standalone"`) → `CMD ["node", "server.js"]`
-3. `.dockerignore` (root) and `frontend/.dockerignore` — exclude `.venv`/`node_modules`, `.chroma`, `.env`/`.env.local`, `__pycache__`, `.next`
+3. `backend/.dockerignore` and `frontend/.dockerignore` — exclude `.venv`/`node_modules`, `.chroma`, `.env`/`.env.local`, `__pycache__`, `.next`
 4. `docker-compose.yml` (root) — three services:
    ```yaml
    services:
      redis:
        image: redis:7
        ports: ["6379:6379"]
+       healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 5}
      backend:
-       build: .
-       env_file: .env
+       build: ./backend            # build context is backend/, not the repo root
+       env_file: backend/.env      # not root .env — backend/ is its own project root
+       environment:
+         REDIS_URL: redis://redis:6379/0   # overrides backend/.env's localhost value
        ports: ["8000:8000"]
-       depends_on: [redis]
+       depends_on: {redis: {condition: service_healthy}}
+       healthcheck: {test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"], interval: 5s, retries: 5}
      frontend:
-       build: ./frontend
-       env_file: frontend/.env.local
+       build:
+         context: ./frontend
+         args: {NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/v1}
        ports: ["3000:3000"]
-       depends_on: [backend]
+       depends_on: {backend: {condition: service_healthy}}
+       healthcheck: {test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"], interval: 5s, retries: 5}
    ```
-   `backend`'s `REDIS_URL` and `frontend`'s `NEXT_PUBLIC_API_BASE_URL` are set to the compose service DNS names (`redis`, `backend`), not `localhost` — a common first-run break since it works from the host but not container-to-container. Postgres (Supabase) is reached the same way either way, since it's already remote.
-5. Verify Chroma persistence survives a container restart: the backend image bind-mounts `multi_agent/.chroma/` (`volumes: ["./multi_agent/.chroma:/app/multi_agent/.chroma"]`) rather than baking it into the image, so re-ingesting on every rebuild isn't required
+   Easy-to-get-wrong details, corrected here from an earlier draft of this plan:
+   - `env_file` must point at `backend/.env`, not a root `.env` — `docker-compose.yml` lives at the repo root but the actual file (and everything reading it) is under `backend/`.
+   - `backend`'s build context is `./backend`, not `.` — an earlier draft put `backend/Dockerfile` at the repo root purely so it would sit next to `docker-compose.yml`, which forced every `COPY` in it to carry a `backend/` prefix for no functional reason (the image copies nothing from outside `backend/`). Moving the `Dockerfile` into `backend/` itself lets those `COPY` paths drop the prefix, matching how `frontend/Dockerfile` already builds from `./frontend`.
+   - Only `backend`'s `REDIS_URL` should use the compose DNS name (`redis`) — that traffic is container-to-container. `NEXT_PUBLIC_API_BASE_URL` must stay a **host**-reachable URL (`http://localhost:8000/v1`), not `http://backend:8000/v1`: Next.js inlines `NEXT_PUBLIC_*` values into the client JS bundle at *build* time, and that bundle runs in the user's browser on the host machine, not inside the compose network — the browser can never resolve the `backend` DNS name. This also means it must be passed as a Docker build `arg`, not a service `environment`/`env_file` entry, since those only affect the already-built server process. Postgres (Supabase) needs no DNS-name juggling either way, since it's already a remote host from both sides.
+   - `depends_on: condition: service_healthy` (not bare `depends_on: [service]`) plus explicit `healthcheck:` blocks on all three services — bare `depends_on` only waits for the container to *start*, not for Redis/the backend to actually be ready, which would make "confirm all three containers report healthy" in the testing step below unverifiable.
+5. Verify Chroma persistence survives a container restart: the backend image bind-mounts `multi_agent/.chroma/` (`volumes: ["./backend/multi_agent/.chroma:/app/multi_agent/.chroma"]`, host path relative to `docker-compose.yml` at the repo root, container path relative to the image's `WORKDIR /app`) rather than baking it into the image, so re-ingesting on every rebuild isn't required
 6. Testing: `docker compose up --build` from a clean state (no local `.venv`/`node_modules` needed on the host at all) — confirm all three containers report healthy, then run the same manual smoke test as Phase 8's (register → login → create session → chat → SSE stream, from the browser at `localhost:3000`) entirely through the containerized stack. **Failure-path**: stop the `redis` container mid-session and confirm the app degrades per the existing Redis-fallback behavior (Phase 4/6), not a crash — same assertion as those phases' tests, just re-run against real containers instead of `fakeredis`, to catch anything container networking hides that a mock wouldn't
 7. Document the one-command flow in a root `README.md` section: `docker compose up --build`, plus which two `.env` files (`./.env`, `frontend/.env.local`) must exist first since compose doesn't create them
 

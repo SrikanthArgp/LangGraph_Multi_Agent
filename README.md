@@ -93,6 +93,28 @@ Backend, from `backend/`:
 pytest tests/ multi_agent/chains/tests/ -m "not integration"
 ```
 
+## 6. Or: run the whole stack in Docker (one command)
+
+Steps 1–3 above run everything with hot-reload, directly on the host. Alternatively, run the
+containerized stack (backend + frontend + Redis; Postgres stays on Supabase either way):
+
+```powershell
+docker compose up --build
+```
+
+Needs, before the first run:
+- `backend/.env` populated (same file as step 2 above)
+- `frontend/.env.local` populated (same file as step 3 above) — note this only matters at
+  *build* time, not runtime: `NEXT_PUBLIC_API_BASE_URL` gets inlined into the browser bundle by
+  `next build`, so changing it after the image is built requires a rebuild, not just a restart
+- Port 6379 free on the host — if you already have a standalone `crag-redis` container running
+  from steps 1–3, stop it first (`docker stop crag-redis`); compose runs its own `redis` service
+  on the same port
+
+Once `docker compose ps` shows all three services `healthy`, open `http://localhost:3000` and
+run the same manual test table from step 4. `docker compose down` stops everything; the ingested
+Chroma vector store persists across rebuilds (bind-mounted, not baked into the image).
+
 ## Troubleshooting
 
 - **Frontend can't reach the backend / CORS errors**: confirm `backend/.env`'s `CORS_ORIGINS`
