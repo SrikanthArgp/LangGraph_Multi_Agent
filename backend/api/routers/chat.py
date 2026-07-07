@@ -42,12 +42,32 @@ async def _get_owned_session_or_404(
     return session
 
 
-def _graph_config(session_id: uuid.UUID) -> dict:
+def _graph_config(session_id: uuid.UUID, *, trace_name: str, user_id: uuid.UUID) -> dict:
+    """Build the LangGraph run config, including Langfuse trace tagging.
+
+    Trace attributes are set via the `langfuse_*` metadata keys that
+    `langfuse.langchain.CallbackHandler` reads (`_parse_langfuse_trace_attributes`), not via
+    `langfuse.propagate_attributes` - this graph's nodes are plain sync functions, so
+    LangGraph runs them through a thread-pool executor under `.ainvoke()`, and OTel context
+    (what propagate_attributes relies on) does not cross that thread boundary: a span opened
+    inside the executor thread gets a brand-new trace_id, disconnected from the caller's
+    context, so no tags would ever land on it. LangChain's `metadata` dict, in contrast, is
+    passed explicitly down the call chain rather than via contextvars, so it survives the
+    thread hop (confirmed empirically - see Phase 13 completed.md entry).
+    """
     callbacks = []
     handler = get_langfuse_handler()
     if handler is not None:
         callbacks.append(handler)
-    return {"configurable": {"thread_id": str(session_id)}, "callbacks": callbacks}
+    return {
+        "configurable": {"thread_id": str(session_id)},
+        "callbacks": callbacks,
+        "metadata": {
+            "langfuse_session_id": str(session_id),
+            "langfuse_user_id": str(user_id),
+            "langfuse_trace_name": trace_name,
+        },
+    }
 
 
 async def _cache_new_messages(
@@ -102,7 +122,10 @@ async def send_message(
 
     try:
         result = await graph.ainvoke(
-            {"question": payload.question}, config=_graph_config(session.id)
+            {"question": payload.question},
+            config=_graph_config(
+                session.id, trace_name="chat_send_message", user_id=current_user.id
+            ),
         )
     except Exception as e:
         logger.warning("chat_generation_failed", exc_info=True)
@@ -159,7 +182,12 @@ async def stream_message(
     question_message = await messages_crud.create_message(db, session.id, "user", question)
 
     try:
-        result = await graph.ainvoke({"question": question}, config=_graph_config(session.id))
+        result = await graph.ainvoke(
+            {"question": question},
+            config=_graph_config(
+                session.id, trace_name="chat_stream_message", user_id=current_user.id
+            ),
+        )
     except Exception:
         logger.warning("chat_stream_generation_failed", exc_info=True)
 

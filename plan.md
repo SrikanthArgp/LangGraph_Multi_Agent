@@ -899,10 +899,10 @@ Consolidates fixtures and tiering for tests that already exist from each phase's
 3. `/health` endpoint with real `SELECT 1` DB check and Redis `PING`
 4. Testing: hit `/health` with both dependencies up (expect 200) and again with the Redis container stopped (expect the documented degraded response, not a 500); a test that exceeds the general rate limit bucket and confirms 429
 
-### Phase 13 — Observability (Langfuse)
+### Phase 13 — Observability (Langfuse) — Complete
 > Numbered here for doc/folder consistency only — the actual wiring happens in **Phase 5, step 4** above, as soon as `create_app()` exists. This phase entry exists so `completed.md`/`tests/`/`test_reports/` have a phase slot to track it against, matching every other phase in this plan.
 1. `observability/langfuse_client.py`: `get_langfuse_handler()` (done in Phase 5)
-2. Wire the handler into `api/routers/chat.py`'s sync-invoke and SSE-stream paths (Phase 6), with `langfuse.propagate_attributes(trace_name=..., user_id=..., session_id=...)` so traces are filterable per user/session
+2. Wire the handler into `api/routers/chat.py`'s sync-invoke and SSE-stream paths (Phase 6), tagged with `user_id`/`session_id`/`trace_name` via LangChain's `config={"metadata": {"langfuse_user_id": ..., "langfuse_session_id": ..., "langfuse_trace_name": ...}}` — **not** `langfuse.propagate_attributes()` as originally written here. `propagate_attributes` relies on OTel context (contextvars), which does not survive LangGraph's thread-pool execution of this graph's plain-sync nodes under `.ainvoke()` (proven by a repro: a span opened inside `loop.run_in_executor` gets an unrelated `trace_id`); the `metadata` dict is passed by value through LangChain's config plumbing instead, so it survives. See `completed.md`'s Phase 13 entry for the full repro and the real-trace-data verification.
 3. Wire the handler into `eval/langfuse_eval.py` via `item.get_langchain_handler(...)` (Phase 9)
 4. Testing: unit test that `get_langfuse_handler()` returns a `CallbackHandler` without raising when the required env vars are set — so a missing/misconfigured Langfuse key fails a fast test in CI instead of silently disabling tracing in production
 5. Verify: run a few chat requests through the API, confirm traces appear in the Langfuse Cloud dashboard with correct user/session tags and per-node latency/cost breakdown
