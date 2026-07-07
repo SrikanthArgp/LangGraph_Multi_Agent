@@ -59,6 +59,7 @@ async def get_current_user(
     if jti:
         try:
             if await redis_client.exists(f"revoked_token:{jti}"):
+                logger.info("auth_revoked_token_rejected", extra={"jti": jti})
                 raise unauthorized
         except RedisError:
             # Fail open: the JWT signature/expiry check above is the primary security

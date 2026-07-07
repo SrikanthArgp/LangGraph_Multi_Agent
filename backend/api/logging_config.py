@@ -1,4 +1,4 @@
-"""Baseline structured logging (Phase 12) — stdout JSON only, no trace correlation yet.
+"""Structured logging (Phase 12 baseline + Phase 14 trace correlation).
 
 structlog is configured as a thin layer over stdlib `logging` rather than replacing it: most
 of the existing codebase (api/dependencies.py, auth/dependencies.py, cache/*, etc.) already
@@ -9,14 +9,26 @@ structlog-originated ones are rendered through the same JSON pipeline, and
 `structlog.contextvars.bind_contextvars(...)` for the current request, whichever kind of
 logger emitted the record.
 
-Phase 14 (`observability/logging_config.py`, per plan.md) replaces the two literal processors
-below (`TimeStamper` + `JSONRenderer`) with a trace_id/span_id-injecting version wired into
-OTel — that's a superset of this, not a parallel system.
+Phase 14 adds `_add_trace_context`: every log line emitted while an OTel span is active
+(i.e. during a request, once api/otel_client.setup_otel() has instrumented the app) picks up
+that span's trace_id/span_id, so a log line in Loki can be clicked through to its matching
+trace in Tempo. This is additive to Phase 12's baseline, not a parallel/competing config —
+kept in this same file rather than a separate one, since a second logging config would just
+mean two things to keep in sync.
 """
 
 import logging
 
 import structlog
+from opentelemetry import trace
+
+
+def _add_trace_context(logger, method_name, event_dict):
+    span_context = trace.get_current_span().get_span_context()
+    if span_context.is_valid:
+        event_dict["trace_id"] = format(span_context.trace_id, "032x")
+        event_dict["span_id"] = format(span_context.span_id, "016x")
+    return event_dict
 
 
 def configure_logging() -> None:
@@ -25,6 +37,7 @@ def configure_logging() -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
+        _add_trace_context,
     ]
 
     structlog.configure(

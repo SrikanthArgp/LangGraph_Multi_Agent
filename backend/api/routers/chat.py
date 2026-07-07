@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +42,9 @@ async def _get_owned_session_or_404(
     return session
 
 
-def _graph_config(session_id: uuid.UUID, *, trace_name: str, user_id: uuid.UUID) -> dict:
+def _graph_config(
+    session_id: uuid.UUID, *, trace_name: str, user_id: uuid.UUID, request_id: str
+) -> dict:
     """Build the LangGraph run config, including Langfuse trace tagging.
 
     Trace attributes are set via the `langfuse_*` metadata keys that
@@ -54,6 +56,11 @@ def _graph_config(session_id: uuid.UUID, *, trace_name: str, user_id: uuid.UUID)
     context, so no tags would ever land on it. LangChain's `metadata` dict, in contrast, is
     passed explicitly down the call chain rather than via contextvars, so it survives the
     thread hop (confirmed empirically - see Phase 13 completed.md entry).
+
+    `request_id` (plain, non-`langfuse_`-prefixed metadata key) is the same X-Request-ID the
+    request_id_middleware (api/main.py) stamps on this request's OTel span attribute - joining
+    on it is how a Tempo trace and its corresponding Langfuse trace get correlated (Phase 14),
+    without merging the two tools together.
     """
     callbacks = []
     handler = get_langfuse_handler()
@@ -66,6 +73,7 @@ def _graph_config(session_id: uuid.UUID, *, trace_name: str, user_id: uuid.UUID)
             "langfuse_session_id": str(session_id),
             "langfuse_user_id": str(user_id),
             "langfuse_trace_name": trace_name,
+            "request_id": request_id,
         },
     }
 
@@ -110,6 +118,7 @@ async def list_messages(
     "/{session_id}/messages", response_model=ChatResponse, status_code=status.HTTP_201_CREATED
 )
 async def send_message(
+    request: Request,
     session_id: uuid.UUID,
     payload: ChatRequest,
     current_user: User = Depends(get_current_user),
@@ -124,7 +133,10 @@ async def send_message(
         result = await graph.ainvoke(
             {"question": payload.question},
             config=_graph_config(
-                session.id, trace_name="chat_send_message", user_id=current_user.id
+                session.id,
+                trace_name="chat_send_message",
+                user_id=current_user.id,
+                request_id=request.state.request_id,
             ),
         )
     except Exception as e:
@@ -153,6 +165,7 @@ async def send_message(
 
 @router.get("/{session_id}/stream")
 async def stream_message(
+    request: Request,
     session_id: uuid.UUID,
     question: str = Query(min_length=1, max_length=4000),
     current_user: User = Depends(get_current_user),
@@ -185,7 +198,10 @@ async def stream_message(
         result = await graph.ainvoke(
             {"question": question},
             config=_graph_config(
-                session.id, trace_name="chat_stream_message", user_id=current_user.id
+                session.id,
+                trace_name="chat_stream_message",
+                user_id=current_user.id,
+                request_id=request.state.request_id,
             ),
         )
     except Exception:

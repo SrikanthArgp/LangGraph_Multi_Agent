@@ -1,0 +1,167 @@
+# Phase 16 — AWS Container Deployment: ECS Fargate — Step-by-Step
+
+Scope: ECS Fargate (reusing Phase 15's ECR image minus the Lambda Web Adapter layer) + Application Load Balancer + simplified CloudFront (single ALB origin, no more Function-URL/HTTP-API split) + the same SSM/Upstash/Supabase choices as Phase 15, provisioned with Terraform, validated on LocalStack before real AWS. Full design/rationale lives in `plan.md`'s Phase 16 section and Key Design Decisions table — this doc is the execution checklist only. Companion to [`enterprize-deploy-steps.md`](./enterprize-deploy-steps.md) (Phase 15), which this phase builds directly on top of.
+
+Status: planning only, nothing built yet. Renumbered 2026-07-07 (this deploy target was formerly Phase 17) so both AWS deploy targets (Phase 15, this Phase 16) sit before the CI/CD phases (17–19) instead of interleaved with them. **Hard prerequisite: Phase 15 must already be applied at least once** — this phase reuses its ECR repo, SSM parameters, Upstash/Supabase config, and (optionally) its VPC. Don't start Phase 16 against a repo where Phase 15 hasn't been stood up.
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    Browser(["Browser / Client"])
+
+    subgraph Edge["Edge — CloudFront"]
+        CF["CloudFront Distribution\nsingle /v1/* -> ALB behavior"]
+    end
+
+    subgraph Frontend["Static Frontend (reused from Phase 15)"]
+        S3["S3 Bucket (private)"]
+    end
+
+    subgraph VPC["VPC — 2 public subnets across 2 AZs + IGW"]
+        ALB["Application Load Balancer\nHTTP:80 listener"]
+        TG["Target Group\ntarget_type=ip, health check /health"]
+        subgraph Service["ECS Service (Fargate, desired count 1)"]
+            Task["Fargate Task\ncontainer port 8000\nnon-adapter image"]
+        end
+    end
+
+    subgraph SG["Security Groups"]
+        ALBSG["ALB SG\ningress 80 from 0.0.0.0/0"]
+        TaskSG["ECS Task SG\ningress 8000 from ALB SG only"]
+    end
+
+    subgraph IAM["IAM"]
+        ExecRole["Task Execution Role\nECR pull + logs +\nssm:GetParameters + kms:Decrypt"]
+        TaskRole["Task Role\n(empty — no runtime AWS calls)"]
+    end
+
+    subgraph Config["Config, Registry & Scaling"]
+        ECR["ECR Repository\n:ecs tag"]
+        SSM["SSM Parameter Store\n/crag/prod/* — native secrets injection"]
+        CW["CloudWatch Logs"]
+        AutoScale["Application Auto Scaling\ntarget-tracking on CPU >70%"]
+    end
+
+    subgraph External["External SaaS (public HTTPS)"]
+        Upstash["Upstash Redis"]
+        Supabase["Supabase Postgres"]
+    end
+
+    Browser -->|HTTPS| CF
+    CF -->|"default behavior\nvia OAC"| S3
+    CF -->|"/v1/* — HTTP-only origin\n(no ACM cert)"| ALB
+    ALB -.->|protected by| ALBSG
+    ALB --> TG
+    TG --> Task
+    Task -.->|protected by| TaskSG
+    TaskSG -.->|allows only traffic from| ALBSG
+    Task -->|"pulls image, ships logs,\nresolves secrets as env vars"| ExecRole
+    Task -.->|"assumes, currently unused"| TaskRole
+    ExecRole -.->|"ecr:BatchGetImage etc."| ECR
+    ExecRole -.->|"ssm:GetParameters\nkms:Decrypt"| SSM
+    ExecRole -.->|"logs:PutLogEvents"| CW
+    AutoScale -->|"adjusts desired count"| Service
+    Task -->|"TLS, via IGW public IP"| Upstash
+    Task -->|TLS| Supabase
+```
+
+---
+
+## Prerequisites
+
+**Tooling** — same as Phase 15: Terraform CLI, AWS CLI, Docker, LocalStack CLI + `tflocal`.
+
+**Accounts / state carried over from Phase 15**
+- The same LocalStack Ultimate trial window from Phase 15 — this phase depends on it too (ECS and ALB both need Base tier or higher; Base itself is sufficient for both, see the Phase 15 pricing check — but the plan's free path is Ultimate's trial). If that trial has already lapsed, `plan.md` documents its own fallback: skip LocalStack entirely and iterate directly against real AWS in a tight `apply` → smoke-test → `destroy` loop (~$1/day, cheaper than a Base subscription just to validate locally).
+- Phase 15's ECR repo, SSM parameters, Upstash Redis instance, and Supabase Postgres connection — all reused unchanged, not rebuilt.
+
+**New for this phase**
+- A load-testing tool to drive the autoscaling verification step — `plan.md` doesn't name one; pick something lightweight (`hey`, `ab`, or a small `k6`/`locust` script) before Stage C.
+
+---
+
+## Stage A — Image & Terraform scaffolding
+
+1. Add a second image build path that omits the Lambda Web Adapter layer — plain `CMD ["python", "run_api.py"]`, real `uvicorn` behind a real load balancer. `plan.md` says Phase 16 reuses "the same ECR image built for Lambda, minus the Lambda Web Adapter layer" — since one Dockerfile can't conditionally include/exclude a layer at run time, this needs an actual second build target (multi-stage Dockerfile stage, or a build-arg toggle, or a second Dockerfile e.g. `Dockerfile.ecs`). Decide the mechanism here, not while writing the ECS task definition.
+2. Decide whether Phase 16's ECS/ALB resources go into Phase 15's existing `infra/` Terraform state, or a separate state file that references Phase 15 via remote state data sources. Either works; `plan.md` doesn't mandate one — pick based on how independently you want to be able to `destroy` each phase.
+3. Decide the VPC: reuse Phase 15's VPC (simpler, one less thing to manage) or size a new minimal one (cleaner separation, but Fargate always needs *a* VPC — Lambda in Phase 15 deliberately avoided needing one at all, so if Phase 15 never provisioned a VPC, this phase creates the first one). Either way: public subnets + Internet Gateway route for the Fargate task's public IP, not a private subnet + NAT Gateway (cost-driven, same reasoning as Phase 15's Lambda-out-of-VPC choice).
+4. Add IAM for ECS: a **task execution role** (ECR image pull, CloudWatch Logs, and — if using ECS-native secret injection, see Stage B step 6 — `ssm:GetParameters` scoped to the specific parameter ARNs), and a **task role** only if the app needs to call AWS APIs itself at runtime beyond secret injection (it currently doesn't).
+
+## Stage B — Validate on LocalStack (same trial window as Phase 15)
+
+5. Confirm the Ultimate trial from Phase 15 is still active. If it's expired, skip straight to Stage C using the real-AWS iteration loop instead.
+6. Build and push the non-adapter image variant to the (LocalStack) ECR repo under its own tag (e.g. `:ecs` alongside Phase 15's `:lambda`).
+7. Terraform apply against LocalStack:
+   - `aws_ecs_cluster`
+   - `aws_ecs_task_definition` — 0.25 vCPU / 0.5 GB, container port 8000, secrets wired from SSM. **Decide the injection mechanism here**: ECS task definitions support native `secrets` (resolves SSM/Secrets Manager values straight into container env vars at task start, no app code needed) — this is actually simpler than Phase 15's approach, where the `boto3`-in-`config.py` path exists specifically because *Lambda* has no equivalent native SSM-to-env-var resolution. Using ECS-native secrets here means `config.py` can likely just read plain env vars for this deployment target, with the `boto3` branch staying Lambda-specific rather than generically "production." Worth resolving before writing the task definition, since it changes what `config.py` needs to do.
+   - `aws_ecs_service` — Fargate launch type, desired count 1, public IP enabled, attached to the target group
+   - `aws_lb` (ALB) + target group (health check on `/health`) + listener. **Open decision**: `plan.md` says "HTTPS listener," but Phase 15 deliberately skipped a custom domain/ACM certificate (using CloudFront's default domain to stay free). An ALB HTTPS listener needs its own ACM certificate bound to a real domain, which isn't provisioned anywhere in the plan. If the ALB is only ever reached through CloudFront (which already terminates public HTTPS on its own default domain), the ALB itself can run an **HTTP-only listener on port 80**, with CloudFront's origin-protocol-policy set to HTTP-only or match-viewer — avoiding the need for a domain/cert entirely. Decide this before writing the listener resource.
+   - Security groups: ALB's SG open on whichever port the listener above ends up using; the ECS task's SG only accepts traffic from the ALB's SG (never open directly to the internet)
+   - `aws_appautoscaling_target` + `aws_appautoscaling_policy` — target-tracking on CPU (e.g. scale out above 70%)
+8. CloudFront: update the distribution from Phase 15 (or recreate it under LocalStack) — collapse the old Function-URL-vs-HTTP-API path split into a single `/v1/*` → ALB behavior; the S3 frontend origin carries over unchanged.
+9. Smoke test against LocalStack: register → login → create session → chat → SSE stream — same flow as Phase 15.
+
+## Stage C — Real AWS
+
+10. Point Terraform at real AWS (same provider/backend swap pattern as Phase 15).
+11. Build and push the real non-adapter image to the real ECR repo, under its own tag.
+12. `terraform apply` against real AWS.
+13. Run the same manual smoke test against the live CloudFront URL.
+14. Confirm the SSE stream is genuinely token-by-token-shaped end-to-end **with no adapter layer involved** — this is the one check worth doing distinctly from Phase 15, since removing the Lambda Web Adapter workaround entirely is the actual point of this phase.
+15. Re-run the same Redis/DB failure-path checks as Phase 15 (Upstash down, DB down → documented graceful degrade, not a crash).
+16. Load-balancer health-check failure test: stop the running task manually, confirm the ALB marks the target unhealthy and stops routing to it.
+17. Autoscaling verification: drive a synthetic CPU-heavy load against the service with the tool picked in Prerequisites, confirm the target-tracking policy actually launches a second task.
+
+## Stage D — Wrap-up
+
+18. `terraform destroy` between demos, same discipline as Phase 15 — but note the different cost shape: the ALB bills hourly (~$16–20/month) from the moment it exists, unlike Phase 15's fully pay-per-use Lambda stack. "Leave it running overnight without thinking about it" is not safe here the way it arguably was for Phase 15.
+19. Update `completed.md` / `plan.md` phase status once verified end-to-end.
+
+---
+
+## Open questions surfaced during this pass
+
+- **ALB listener protocol/cert** (Stage B, step 7) — HTTPS needs an ACM cert + real domain not provisioned anywhere in the plan; HTTP-only behind CloudFront is the likely simpler path but isn't what the plan's wording implies. **Resolved below.**
+- **Secret injection mechanism** (Stage B, step 7) — ECS-native `secrets` (no app code, task-definition-level) vs. reusing Phase 15's `boto3`-in-`config.py` path. ECS supports the former natively; Lambda doesn't, which is *why* Phase 15 needed the `boto3` workaround in the first place. Worth simplifying `config.py` once this is decided, rather than carrying Lambda's workaround into a platform that doesn't need it. **Resolved below.**
+- **Shared vs. new VPC** (Stage A, step 3) — `plan.md` phrases this as "reuse Phase 15's VPC (or a minimally-sized new one)" without picking one; decide based on whether Phase 15 ends up provisioning a VPC at all. **Resolved below.**
+- **Load-testing tool** for the autoscaling check (Stage C, step 17) — not named in `plan.md`; pick one before you get there. **Resolved below.**
+
+---
+
+## Resource Wiring Detail: IAM roles, security groups, inputs/outputs (added 2026-07-07, design only)
+
+Fills in the permissions/roles/SGs/wiring left implicit in Stage A/B above, and closes the four open questions. Nothing here is built yet — this is what to implement against, resource by resource, once Phase 15 is standing. Companion to the equivalent section in [`enterprize-deploy-steps.md`](./enterprize-deploy-steps.md) (Phase 15) — read that one first for the "why no security groups exist there," since this phase is where they first show up in this project's AWS footprint.
+
+**This phase introduces the project's first VPC and its first security groups.** Phase 15's Lambda deliberately stayed out of a VPC entirely; Fargate cannot — `awsvpc` networking mode requires every task to sit in a subnet with an attached ENI. Resolving the open "shared vs. new VPC" question: since Phase 15 provisions no VPC at all, there is nothing to share — **Phase 16 creates a new, minimal VPC** here: one VPC, two public subnets in two different AZs (an ALB requires subnets in at least two AZs, even for a single-task service), one Internet Gateway, one route table with a `0.0.0.0/0 → igw` route attached to both public subnets. No private subnets, no NAT Gateway — the task gets a public IP directly, same cost reasoning as Phase 15's Lambda-out-of-VPC choice.
+
+**Per-resource IAM / security-group / wiring table:**
+
+| Resource (Terraform type) | IAM role or security group | Inputs (← from) | Outputs (→ consumed by) |
+|---|---|---|---|
+| VPC + 2 public subnets + IGW + route table (`aws_vpc`, `aws_subnet` ×2, `aws_internet_gateway`, `aws_route_table`) | — | — | subnet IDs → ALB + ECS service `network_configuration`; VPC ID → both security groups below |
+| ALB security group (`aws_security_group`) | ingress: port 80 (see listener decision below) from `0.0.0.0/0`; egress: all | VPC ID | referenced by the ALB and, by reference, by the ECS task SG's ingress rule |
+| ECS task security group (`aws_security_group`) | ingress: container port 8000, **source = ALB security group only** (`security_groups = [aws_security_group.alb.id]`, never a CIDR) — the task is never reachable directly from the internet; egress: all (outbound to Upstash/Supabase/OpenAI/Tavily, all public HTTPS endpoints) | VPC ID + ALB SG ID | referenced by the ECS service's `network_configuration` |
+| task execution role (`aws_iam_role`, trust = `ecs-tasks.amazonaws.com`) | ECR pull actions (`GetAuthorizationToken`, `BatchGetImage`, `GetDownloadUrlForLayer`) scoped to the backend repo; CloudWatch Logs (`CreateLogStream`, `PutLogEvents`) scoped to this task's log group; if any secret still needs SSM (see resolution below), `ssm:GetParameters` + `kms:Decrypt` scoped exactly as Phase 15's Lambda role — **this is the role AWS itself uses to start the container**, distinct from... | — | `arn` → task definition's `execution_role_arn` |
+| task role (`aws_iam_role`, trust = `ecs-tasks.amazonaws.com`) | ...**this** — the role the *application code* runs as once the container is up. Currently no permissions needed (the app makes zero AWS API calls at runtime under the ECS-native-secrets resolution below) — provision it empty/unused rather than skip it, so adding a runtime AWS call later doesn't require restructuring | — | `arn` → task definition's `task_role_arn` |
+| ECS cluster (`aws_ecs_cluster`) | — | — | `arn`/`name` → task definition + service |
+| task definition (`aws_ecs_task_definition`, Fargate, 0.25 vCPU / 0.5 GB) | runs with execution role (pulls image, ships logs, resolves secrets) + task role (runtime AWS calls, currently none) | `image` ← ECR `repository_url` + the non-adapter `:ecs` tag (Stage A step 1); `execution_role_arn`/`task_role_arn` ← the two roles above; `secrets` block ← SSM parameter ARNs (see resolution below) | `arn` → ECS service |
+| ECS service (`aws_ecs_service`, launch type Fargate, desired count 1) | no IAM of its own; network perimeter is the ECS task security group | `cluster` ← cluster; `task_definition` ← task def `arn`; `network_configuration.subnets` ← the two public subnets, `security_groups` ← ECS task SG, `assign_public_ip = true`; `load_balancer` block ← target group `arn` | registers/deregisters itself against the target group as tasks start/stop |
+| target group (`aws_lb_target_group`, `target_type = "ip"` — required for `awsvpc` mode) | — | health check on `/health`, port 8000 | `arn` → ECS service's `load_balancer` block and the listener's default action |
+| ALB (`aws_lb`, internet-facing) | perimeter = the ALB security group above | `subnets` ← the two public subnets; `security_groups` ← ALB SG | `dns_name` → CloudFront's origin domain for the `/v1/*` behavior |
+| listener (`aws_lb_listener`) | — | `load_balancer_arn` ← ALB; forwards to target group | see protocol resolution below |
+| autoscaling target + target-tracking policy (`aws_appautoscaling_target` + `_policy`) | operator/CI IAM needs `application-autoscaling:*` + `ecs:UpdateService` (see operator table below) — no role attached to the resources themselves | `resource_id = "service/<cluster>/<service>"`, `scalable_dimension = "ecs:service:DesiredCount"` | scales the ECS service's desired count on `ECSServiceAverageCPUUtilization` crossing ~70% |
+| CloudFront distribution (updated from Phase 15) | unchanged perimeter model from Phase 15 for the S3 behavior; the Function-URL-specific permission/OAC from Phase 15 is deleted entirely, not reused | ALB `dns_name` replaces the old Function-URL + HTTP-API origins in a single collapsed `/v1/*` behavior | `domain_name` remains the terminal output — same public app URL as Phase 15, now backed by ECS instead of Lambda |
+| ECR repo, SSM parameters, Upstash Redis, Supabase Postgres | unchanged from Phase 15 — reused, not recreated | ECR: new `:ecs` tag added alongside Phase 15's `:lambda` tag in the same repo. SSM: same parameters; if ECS-native secrets are used, the *task execution role* needs the SSM+KMS read grant instead of the *application* holding it (a meaningful IAM shift from Phase 15 — see below) | — |
+
+**Open question — ALB listener protocol, resolved:** HTTP-only on port 80, not HTTPS. An HTTPS listener needs an ACM certificate bound to a real domain, and nothing in either phase provisions a domain — Phase 15 deliberately stayed on CloudFront's free default domain, and this phase keeps that constraint. CloudFront already terminates public HTTPS on its own default domain; set its origin's `origin_protocol_policy` to `http-only` so CloudFront-to-ALB traffic runs over plain HTTP on the private AWS backbone segment between them. **Trade-off worth stating plainly**, since it's a real one: this leaves CloudFront-to-origin traffic unencrypted in transit, whereas Phase 15's Function-URL/API-Gateway origins were HTTPS end-to-end. Accepted here for the same reason Phase 15 skipped a custom domain — avoiding Route 53 + ACM cost/complexity for a learning deployment — but it's a genuine downgrade from Phase 15's transport security, not a free simplification, and worth revisiting if this ever moves past a demo/learning context.
+
+**Open question — secret injection, resolved:** use ECS-native `secrets` in the container definition, not Phase 15's `boto3`-in-`config.py` path. Each entry in the task definition's `secrets` list (`{name = "OPENAI_API_KEY", valueFrom = aws_ssm_parameter.openai_key.arn}`) is resolved by the ECS agent into a plain environment variable before the container starts — no application code involved. This means the **task execution role**, not the task role and not the running application, needs `ssm:GetParameters` + `kms:Decrypt` scoped to `/crag/prod/*` (mirroring Phase 15's Lambda-role policy almost exactly, just attached to a different role for a different reason). Practical effect on `config.py`: gate the existing `boto3` SSM-reading branch behind a signal that's specifically true on Lambda (e.g. presence of `AWS_LAMBDA_FUNCTION_NAME`) rather than the current generic `APP_ENV=production` check — on ECS, `APP_ENV=production` should resolve straight to `os.environ`, since the values are already there by the time the app starts. Small `config.py` change, not infra-only.
+
+**Open question — load-testing tool, resolved:** use `hey` for the Stage C autoscaling check — a single static binary, no script/setup needed for a short synthetic spike (`hey -z 2m -c 50 https://<cloudfront-domain>/v1/...`), which is all this verification needs. `k6`/`locust` are more capable than this one-off check requires.
+
+**Operator/CI permissions added for this phase** (on top of Phase 15's list — same principle, this is the human/CI identity running `terraform apply`, not a resource's own role): `ec2:*Vpc*`/`*Subnet*`/`*InternetGateway*`/`*RouteTable*`/`*SecurityGroup*` (Create/Describe/Delete) for the new networking; `ecs:*` for cluster/task-definition/service lifecycle; `elasticloadbalancing:*` for the ALB/target group/listener; `application-autoscaling:RegisterScalableTarget`/`PutScalingPolicy`; and again **`iam:PassRole`**, this time for both the task execution role and the task role, since Terraform hands both to the task definition at creation time.
+
+**Full wiring order:** VPC + 2 public subnets + IGW + route table → both security groups (ECS task SG's rule references the ALB SG's ID, so ALB SG must exist first) → task execution role + task role → ECS cluster → non-adapter image built and pushed to ECR under `:ecs` (script step) → task definition (needs both roles' ARNs + the image URI + SSM parameter ARNs for the `secrets` block) → target group → ALB (needs the two public subnets + ALB SG) → listener (needs ALB `arn` + target group `arn`) → ECS service (needs cluster + task definition + both subnets + ECS task SG + target group `arn` — this is what actually starts the task and registers it) → autoscaling target/policy (needs the service to exist) → CloudFront distribution updated to point its `/v1/*` origin at the ALB's `dns_name`, replacing Phase 15's Function-URL/API-Gateway origins outright.

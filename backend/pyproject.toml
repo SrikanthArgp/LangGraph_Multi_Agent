@@ -51,6 +51,14 @@ prod = [
     "pydantic-settings>=2.0",
     # EmailStr validation in api/schemas/auth.py
     "email-validator>=2.0",
+    # Observability (Phase 14): general app tracing (FastAPI/SQLAlchemy/Redis spans),
+    # separate from langfuse above which stays scoped to LLM/chain-level detail.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-redis>=0.48b0",
 ]
 eval = [
     # Pinned — ragas 0.4.x's metric classes require an InstructorBaseRagasLLM (via

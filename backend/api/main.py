@@ -23,6 +23,7 @@ import structlog
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from opentelemetry import trace
 from psycopg_pool import AsyncConnectionPool
 from redis.exceptions import RedisError
 from sqlalchemy import text
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.dependencies import get_db, get_redis
 from api.error_handlers import register_error_handlers
 from api.logging_config import configure_logging
+from api.otel_client import setup_otel
 from api.routers import auth, chat, sessions
 from auth.dependencies import get_db_session, get_redis_client
 from config import get_settings
@@ -69,9 +71,10 @@ async def lifespan(app: FastAPI):
     # plan.md's lifespan snippet creates its own `create_async_engine(...)` here, but that
     # engine would sit unused (all queries already go through db/base.py's async_session_factory
     # via api/dependencies.get_db) while doubling Supabase pooler connection usage for nothing.
-    # This reference exists for Phase 13's SQLAlchemyInstrumentor, which needs to instrument
+    # This reference exists for Phase 14's SQLAlchemyInstrumentor, which needs to instrument
     # the engine that's actually queried.
     app.state.db_engine = db_engine
+    setup_otel(app, app.state.db_engine)
 
     # socket_connect_timeout/socket_timeout: every caller of this client already treats
     # RedisError as fail-open/degrade (Phase 3's revocation check, Phase 4's
@@ -114,6 +117,12 @@ def create_app() -> FastAPI:
         # same task otherwise, which would leak into whatever runs after this middleware
         # returns on a reused task.
         structlog.contextvars.bind_contextvars(request_id=request_id)
+        # Correlates this request's OTel span (Tempo) with its Langfuse trace (chat.py passes
+        # the same request_id into langfuse metadata) - the two tools stay separate (Langfuse
+        # for LLM/chain detail, OTel for general app/DB/cache spans) but are joinable by this ID.
+        current_span = trace.get_current_span()
+        if current_span.is_recording():
+            current_span.set_attribute("request_id", request_id)
         try:
             response = await call_next(request)
         finally:

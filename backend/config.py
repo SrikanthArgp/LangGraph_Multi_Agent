@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     # General per-user rate limiting (Phase 12), applied to authenticated sessions/chat routes
     rate_limit_general_per_minute: int = 60
 
+    # OpenTelemetry / Grafana Cloud (Phase 14) — all optional. api/otel_client.py degrades to
+    # local-only spans (never exported) when any of these are missing, same fail-open pattern
+    # as observability/langfuse_client.get_langfuse_handler().
+    otel_exporter_otlp_endpoint: str | None = None
+    grafana_otlp_instance_id: str | None = None
+    grafana_otlp_token: str | None = None
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

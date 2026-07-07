@@ -1,3 +1,4 @@
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -31,6 +32,8 @@ from cache.sessions import revoke_token as cache_revoke_token
 from db.crud import refresh_tokens as refresh_tokens_crud
 from db.crud import users as users_crud
 from db.models import User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -103,6 +106,7 @@ async def login(
         raise invalid
 
     tokens = await _issue_token_pair(db, user)
+    logger.info("auth_login", extra={"user_id": str(user.id)})
     return AuthResponse(tokens=tokens, user=UserResponse.model_validate(user))
 
 
@@ -133,6 +137,7 @@ async def refresh(
     await refresh_tokens_crud.revoke(db, row)
     await _revoke_in_cache(redis, claims["jti"], claims["exp"])
 
+    logger.info("auth_token_refreshed", extra={"user_id": str(user.id)})
     return await _issue_token_pair(db, user)
 
 
@@ -159,6 +164,8 @@ async def logout(
                 await _revoke_in_cache(redis, refresh_claims["jti"], refresh_claims["exp"])
             except JWTError:
                 pass
+
+    logger.info("auth_logout", extra={"user_id": str(current_user.id)})
 
 
 @router.get("/me", response_model=UserResponse)
