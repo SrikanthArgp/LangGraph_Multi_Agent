@@ -4,9 +4,12 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
+from config import bootstrap_env
 
-load_dotenv()
+# Must run before any of this file's later imports - db/base.py, auth/jwt.py, and
+# auth/dependencies.py all read os.environ at their own import time, not lazily through
+# Settings (see config.py's bootstrap_env docstring for why).
+bootstrap_env()
 
 if sys.platform == "win32":
     # psycopg's async mode cannot run on the default ProactorEventLoop - same fix as

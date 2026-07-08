@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
 
@@ -23,8 +23,8 @@ function sessionLabel(session: SessionResponse): string {
 // whatever it gets back without re-slicing.
 export function SessionSidebar() {
   const router = useRouter();
-  const params = useParams<{ sessionId?: string }>();
-  const activeSessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+  const searchParams = useSearchParams();
+  const activeSessionId = searchParams.get("sessionId") ?? undefined;
   const { user, logout } = useAuth();
 
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
@@ -58,7 +58,7 @@ export function SessionSidebar() {
         body: JSON.stringify({}),
       });
       setSessions((prev) => [session, ...prev]);
-      router.push(`/chat/${session.id}`);
+      router.push(`/chat?sessionId=${session.id}`);
     } catch {
       // Best-effort - the user can just click "+ New" again.
     } finally {
@@ -158,7 +158,7 @@ export function SessionSidebar() {
                     }`}
                   >
                     <button
-                      onClick={() => router.push(`/chat/${session.id}`)}
+                      onClick={() => router.push(`/chat?sessionId=${session.id}`)}
                       className="flex-1 truncate text-left text-sm text-zinc-800 dark:text-zinc-200"
                       title={sessionLabel(session)}
                     >

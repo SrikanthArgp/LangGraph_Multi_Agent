@@ -49,6 +49,9 @@ prod = [
     "structlog>=24.0",
     # Centralized settings (Phase 6): config.py
     "pydantic-settings>=2.0",
+    # AWS SSM Parameter Store reads (Phase 15): config.py's Settings uses this at cold start
+    # when APP_ENV=production, to fetch secrets instead of reading .env.
+    "boto3>=1.35",
     # EmailStr validation in api/schemas/auth.py
     "email-validator>=2.0",
     # Observability (Phase 14): general app tracing (FastAPI/SQLAlchemy/Redis spans),

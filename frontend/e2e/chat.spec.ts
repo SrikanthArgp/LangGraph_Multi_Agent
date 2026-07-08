@@ -16,7 +16,7 @@ test.describe("chat flow", () => {
     await expect(page.getByText("No chat selected")).toBeVisible();
 
     await page.click('button:has-text("+ New")');
-    await expect(page).toHaveURL(/\/chat\/[^/]+$/);
+    await expect(page).toHaveURL(/\/chat\?sessionId=[^&]+$/);
 
     const question = "What is a ReAct agent?";
     await page.fill('input[placeholder="Ask a question…"]', question);
