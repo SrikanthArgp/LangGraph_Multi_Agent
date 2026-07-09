@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Phase 15-19 Architecture Diagrams</title>
+<title>Phase 15-21 Architecture Diagrams</title>
 <script>
   // Set the theme attribute as early as possible (before CSS paints) to
   // avoid a flash of the wrong theme on load. Preference order: an explicit
@@ -228,19 +228,21 @@
 
 <header>
   <div class="header-top">
-    <h1>Phase 15-19 Architecture Diagrams</h1>
+    <h1>Phase 15-21 Architecture Diagrams</h1>
     <button id="theme-toggle" aria-label="Toggle light/dark mode">
       <span class="icon">&#9728;</span>
       <span class="label">Theme</span>
     </button>
   </div>
-  <p>Zoomable/pannable copies of the Mermaid diagrams from the five deployment/pipeline checklist docs. Use the +/- buttons, scroll-wheel over a diagram, or click-and-drag to pan. This file is a viewer only &mdash; the checklist docs remain the source of truth; if a diagram changes there, copy it back into this file to keep them in sync.</p>
+  <p>Zoomable/pannable copies of the Mermaid diagrams from the seven deployment/pipeline checklist docs. Use the +/- buttons, scroll-wheel over a diagram, or click-and-drag to pan. This file is a viewer only &mdash; the checklist docs remain the source of truth; if a diagram changes there, copy it back into this file to keep them in sync.</p>
   <nav>
     <a href="#phase-15">Phase 15 &mdash; Lambda</a>
     <a href="#phase-16">Phase 16 &mdash; ECS Fargate</a>
     <a href="#phase-17">Phase 17 &mdash; CI</a>
     <a href="#phase-18">Phase 18 &mdash; CD: Lambda</a>
     <a href="#phase-19">Phase 19 &mdash; CD: ECS</a>
+    <a href="#phase-20">Phase 20 &mdash; EKS</a>
+    <a href="#phase-21">Phase 21 &mdash; CD: EKS (GitOps)</a>
   </nav>
 </header>
 
@@ -477,10 +479,127 @@ flowchart LR
     </div>
   </section>
 
+  <section class="diagram-section" id="phase-20">
+    <h2>Phase 20 &mdash; AWS Container Deployment (EKS)</h2>
+    <p class="subtitle">Source: <code>eks-enterprize-deploy-steps.md</code></p>
+    <div class="diagram-toolbar" data-toolbar-for="viewport-20">
+      <button data-action="zoom-out" aria-label="Zoom out">&minus;</button>
+      <span class="zoom-level">100%</span>
+      <button data-action="zoom-in" aria-label="Zoom in">+</button>
+      <button class="reset-btn" data-action="reset">Reset</button>
+      <span class="hint">scroll to zoom &middot; drag to pan</span>
+    </div>
+    <div class="diagram-viewport" id="viewport-20">
+      <div class="diagram-canvas">
+        <pre class="mermaid">
+flowchart TD
+    Browser(["Browser / Client"])
+
+    subgraph Edge["Edge - CloudFront (own distribution, separate from Phase 15/16)"]
+        CF["CloudFront Distribution\nsingle /v1/* -&gt; ALB behavior"]
+    end
+
+    subgraph Frontend["Static Frontend (S3 bucket reused read-only from Phase 15)"]
+        S3["S3 Bucket (private)"]
+    end
+
+    subgraph VPC["New VPC - 2 public subnets across 2 AZs + IGW\n(mirrors Phase 16 public-subnet/no-NAT shape, kept separate)"]
+        subgraph EKS["EKS Cluster"]
+            CP["EKS Control Plane\n(AWS-managed)"]
+            subgraph NG["Managed Node Group (EC2, desired 1-2)"]
+                Node["Worker Node(s)"]
+                Pod["Backend Pod(s)\nDeployment + HPA (CPU)"]
+                LBCPod["aws-load-balancer-controller\nDeployment (kube-system)"]
+                CSIPod["secrets-store-csi-driver +\naws provider (DaemonSet)"]
+            end
+        end
+        ALB["Application Load Balancer\n(provisioned BY the controller\nfrom the Ingress, not by Terraform)"]
+        TG["Target Group\ntarget_type=ip -&gt; pods directly"]
+    end
+
+    subgraph SG["Security Groups"]
+        ClusterSG["Cluster SG\ncontrol plane &lt;-&gt; nodes"]
+        NodeSG["Node SG\nnode &lt;-&gt; node, node &lt;-&gt; ALB"]
+        ALBSG["ALB SG (controller-managed)\ningress 80/443 from 0.0.0.0/0"]
+    end
+
+    subgraph IAM["IAM (via OIDC provider, IRSA)"]
+        ClusterRole["EKS Cluster Role"]
+        NodeRole["Node Instance Role\nAmazonEKSWorkerNodePolicy +\nCNI + ECR-ReadOnly"]
+        LBCRole["IRSA: aws-load-balancer-controller\nServiceAccount role"]
+        CSIRole["IRSA: secrets-store-csi-driver\nServiceAccount role\nssm:GetParameter + kms:Decrypt"]
+    end
+
+    subgraph Config["Config, Registry (reused from Phase 15)"]
+        ECR["ECR Repository\n:eks tag (non-adapter image, reused from Phase 16)"]
+        SSM["SSM Parameter Store\n/crag/prod/*"]
+        K8sSecret["K8s Secret\n(synced from SSM by CSI driver)"]
+    end
+
+    subgraph External["External SaaS (public HTTPS)"]
+        Upstash["Upstash Redis"]
+        Supabase["Supabase Postgres"]
+    end
+
+    Browser -->|HTTPS| CF
+    CF -->|"default behavior\nvia OAC"| S3
+    CF -->|"/v1/* - HTTP-only origin\n(no ACM cert, same as Phase 16)"| ALB
+    ALB -.->|protected by| ALBSG
+    ALB --> TG
+    TG --> Pod
+    LBCPod -.->|"watches Ingress,\nprovisions/updates"| ALB
+    LBCPod -->|assumes| LBCRole
+    CSIPod -->|assumes| CSIRole
+    CSIRole -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
+    CSIPod -->|"syncSecret: true"| K8sSecret
+    Pod -->|"envFrom: secretRef"| K8sSecret
+    Node -.->|protected by| NodeSG
+    CP -.->|protected by| ClusterSG
+    Node -->|assumes| NodeRole
+    NodeRole -.->|"ecr:BatchGetImage etc."| ECR
+    Pod -->|"TLS, via IGW public IP"| Upstash
+    Pod -->|TLS| Supabase
+        </pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="diagram-section" id="phase-21">
+    <h2>Phase 21 &mdash; CD: EKS via ArgoCD (GitOps)</h2>
+    <p class="subtitle">Source: <code>ci-cd-eks-steps.md</code></p>
+    <div class="diagram-toolbar" data-toolbar-for="viewport-21">
+      <button data-action="zoom-out" aria-label="Zoom out">&minus;</button>
+      <span class="zoom-level">100%</span>
+      <button data-action="zoom-in" aria-label="Zoom in">+</button>
+      <button class="reset-btn" data-action="reset">Reset</button>
+      <span class="hint">scroll to zoom &middot; drag to pan</span>
+    </div>
+    <div class="diagram-viewport" id="viewport-21">
+      <div class="diagram-canvas">
+        <pre class="mermaid">
+flowchart LR
+    CIPass(["Phase 17 CI: green\non push to main"]) --> Trigger["cd-eks.yml triggers\non: push to main\npaths-ignore: gitops/multi-agent/**"]
+    Trigger --> OIDC["Assume IAM role via\nGitHub OIDC\n(ECR push only - no eks:*,\nno kubectl-equivalent permission)"]
+    OIDC --> Build["docker build\n(non-adapter image,\nreused unchanged from Phase 16/20)"]
+    Build --> Push["Push to ECR\ntag: eks-git-sha (immutable)"]
+    Push --> Bump["yq -i patch\ngitops/multi-agent/values.yaml\nimage.tag = eks-sha"]
+    Bump --> Commit["git commit + push to main\n(GITHUB_TOKEN, contents: write,\nauthor: github-actions[bot])\nWorkflow job ends here"]
+    Commit -.->|"Git diff on\ngitops/multi-agent/**\n(polled, ~3min default,\nor argocd app sync manually)"| ArgoWatch["ArgoCD Application\n(already running in-cluster,\nfrom Phase 20)"]
+    ArgoWatch --> Sync["OutOfSync -> Syncing"]
+    Sync --> Apply["ArgoCD applies the Helm\nchart diff to the cluster\n(no CI job touches kubectl)"]
+    Apply --> Health{"Rollout healthy?"}
+    Health -->|yes| Healthy["Synced / Healthy\nnew pods serving"]
+    Health -->|no, e.g. bad image tag| Degraded["Degraded -\nprevious pods keep serving,\nrollout does not complete"]
+    Healthy --> Smoke["Manual/scripted smoke test:\nregister -> login -> chat via\nALB/CloudFront URL"]
+        </pre>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer>
-  Generated as a companion viewer for the five Phase 15-19 checklist docs. Requires internet access once, to load Mermaid from a CDN &mdash; open this file directly in any browser (double-click, or Open With &rarr; browser).
+  Generated as a companion viewer for the seven Phase 15-21 checklist docs. Requires internet access once, to load Mermaid from a CDN &mdash; open this file directly in any browser (double-click, or Open With &rarr; browser).
 </footer>
 
 <script>
