@@ -16,7 +16,7 @@ flowchart LR
 
     BJob --> Checkout["Checkout code"]
     Checkout --> SetupUV["Install uv\n(astral-sh/setup-uv)"]
-    SetupUV --> Sync["uv sync --extra dev --frozen\n(backend/, working-directory)"]
+    SetupUV --> Sync["uv sync --extra dev --extra prod --extra eval --frozen\n(backend/, working-directory)"]
     Sync --> Lint["ruff check ."]
     Lint -->|fail| Blocked1["backend job fails"]
     Lint -->|pass| Test["python -m pytest -m \"not integration\n and not requires_db and not requires_redis\""]
@@ -64,7 +64,7 @@ Every other phase in this plan (15, 16, 18, 19) earns its complexity from a real
 2. Added a `[tool.ruff]` block: `target-version = "py311"` (matching `requires-python = ">=3.11"`) and, under `[tool.ruff.lint]`, `ignore = ["E402"]` — **a real finding, not a default**: running `ruff check .` cold surfaced 41 errors, 40 of which were `E402` (import not at top of file) concentrated in exactly the files that deliberately call `load_dotenv()` before importing modules that read env vars at import time (`multi_agent/main.py`, `multi_agent/graph.py`, `api/main.py`, `tests/conftest.py`, `eval/run_eval.py`, `multi_agent/chains/tests/test_chains.py`) — a documented pattern (see `CLAUDE.md`), not lint debt. Ignored project-wide rather than sprinkling `# noqa: E402` across six files. The 41st error (`F401`, an unused `OperationalError` import in `tests/phase12_production/test_health.py`, referenced only in a comment) was a genuine dead import — removed it. `ruff check .` is clean after both fixes.
 3. **Real finding: `pytest -m "not integration"` alone is not actually dependency-free.** Running it locally with no Redis/Postgres running (the state any GitHub Actions runner starts in) produced 10 failures — `tests/phase1_infrastructure/test_redis_health.py` and `tests/phase4_cache/test_sessions_real_redis.py`, all marked `requires_redis` but *not* `integration`. `-m "not integration and not requires_db and not requires_redis"` is the actual dependency-free fast tier: 65 passed, 0 failed, ~5s, confirmed with no services running at all. Used that exact marker expression in the workflow, not the bare `not integration` this doc originally specified.
 4. Create `.github/workflows/ci.yml` with two independent jobs, `backend` and `frontend` (see the full workflow below).
-5. `backend` job: `defaults.run.working-directory: backend` — this repo's convention is that all commands run from `backend/`, not the repo root; see `CLAUDE.md`. Steps: checkout → install `uv` → `uv sync --extra dev --frozen` → `ruff check .` → `python -m pytest -m "not integration and not requires_db and not requires_redis"` (not bare `pytest` — see Gotchas).
+5. `backend` job: `defaults.run.working-directory: backend` — this repo's convention is that all commands run from `backend/`, not the repo root; see `CLAUDE.md`. Steps: checkout → install `uv` → `uv sync --extra dev --extra prod --extra eval --frozen` (all three extras, not just `dev` — see Gotchas) → `ruff check .` → `python -m pytest -m "not integration and not requires_db and not requires_redis"` (not bare `pytest` — see Gotchas).
 6. `frontend` job: `defaults.run.working-directory: frontend`. Steps: checkout → `actions/setup-node@v4` (Node 20, `cache: npm`) → `npm ci` (not `npm install` — see Gotchas) → `npm run lint` (eslint) → `npm test` (`vitest run`; `vitest.config.mts` already excludes `e2e/**` from its glob, so Playwright specs aren't picked up) → `npm run build` (`next build`, default `"standalone"` output — this job proves the app compiles/type-checks, it isn't producing a deploy artifact). Verified all four steps green locally before writing the workflow: `npm run lint` clean, `npm test` → 32/32 passed, `npm run build` → compiled + typechecked + all 5 routes prerendered, no env vars needed.
 7. Verify: push a branch with a deliberate lint error and a deliberate failing test in each job, confirm both jobs independently fail the workflow; fix both, confirm it goes green.
 8. Go to the repo's branch protection settings for `main` and add **both** `backend` and `frontend` as **required status checks** — the workflow existing does not do this automatically (see Gotchas).
@@ -113,7 +113,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies (frozen)
-        run: uv sync --extra dev --frozen
+        # All three extras, not just dev — see Gotchas.
+        run: uv sync --extra dev --extra prod --extra eval --frozen
 
       - name: Lint
         run: uv run ruff check .
@@ -159,6 +160,8 @@ jobs:
 ---
 
 ## Gotchas
+
+- **`uv sync --extra dev --frozen` alone is not enough to even collect the fast tier — found on the first real PR run, not caught locally.** The first push of this workflow failed `backend` in 16s with `ModuleNotFoundError: No module named 'langgraph.checkpoint.postgres'`: `tests/conftest.py` imports `api.dependencies`, which imports `langgraph.checkpoint.postgres.aio` — a `prod`-extra package, not `dev`. It passed locally first because the local `.venv` already had `prod`/`eval` synced from earlier phases (`completed.md`'s Environment Reference: `uv sync --extra dev --extra prod --extra eval`), masking the gap. Reproduced the CI failure locally with `uv sync --extra dev --extra prod --frozen` (drops `eval`) → next failure, `ModuleNotFoundError: No module named 'ragas'`, from `tests/phase9_eval/test_dataset_and_metrics.py` needing `ragas` at collection time. `uv sync --extra dev --extra prod --extra eval --frozen` is what the fast tier actually needs — confirmed by running the full command fresh: 65/65 pass. **Lesson for verifying this kind of thing going forward**: a local pass with an already-populated `.venv` doesn't prove a clean-install command is sufficient; re-running the exact sync command CI uses (extras and all) against the same venv is what actually catches this class of gap before pushing.
 
 - **`pytest -m "not integration"` alone is not the dependency-free fast tier — confirmed by actually running it with no services up.** `test_redis_health.py` and `test_sessions_real_redis.py` are marked `requires_redis` only, not `integration`, and both need a real Redis connection — with no Redis running (the default state of a GitHub Actions runner, dummy `REDIS_URL` notwithstanding) they fail with `redis.exceptions.ConnectionError`, 10 failures total. The workflow uses `-m "not integration and not requires_db and not requires_redis"` — verified locally to pass 65/65 in ~5s with zero services running. If a future test adds `requires_db`/`requires_redis` without excluding it the same way, it'll pass locally (real Postgres/Redis available) and fail in CI, looking like a flaky CI environment when it's actually a marker mismatch.
 

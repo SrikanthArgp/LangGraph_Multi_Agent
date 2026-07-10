@@ -36,7 +36,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies (frozen)
-        run: uv sync --extra dev --frozen
+        # All three extras are needed even for the fast tier, not just dev: api/dependencies.py
+        # (imported transitively via tests/conftest.py) needs langgraph-checkpoint-postgres from
+        # prod, and tests/phase9_eval/test_dataset_and_metrics.py needs ragas from eval at
+        # collection time — confirmed by a clean `uv sync --extra dev --frozen` failing on both
+        # in CI/a fresh sync, even though it worked locally where prod/eval were already synced.
+        run: uv sync --extra dev --extra prod --extra eval --frozen
 
       - name: Lint
         run: uv run ruff check .
