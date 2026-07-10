@@ -66,6 +66,15 @@ jobs:
           DATABASE_URL_PSYCOPG: "postgresql://test:test@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
           JWT_SECRET_KEY: "ci-dummy-secret-not-for-real-use"
+          # Not settings.py-required fields, but still needed: multi_agent/chains/*.py
+          # instantiate ChatOpenAI(temperature=0) at *module import* time (not lazily), and
+          # multi_agent/nodes/web_search.py does the same for TavilySearchResults(k=3), whose
+          # api_wrapper field has an eager validator requiring TAVILY_API_KEY. Both are on the
+          # tests/conftest.py -> api.dependencies -> multi_agent.graph import chain, so even
+          # fast-tier tests that never call these chains still fail at collection without dummy
+          # values here. Neither key needs to be real — construction only, never invoked.
+          OPENAI_API_KEY: "sk-ci-dummy-not-a-real-key"
+          TAVILY_API_KEY: "tvly-ci-dummy-not-a-real-key"
 
   frontend:
     runs-on: ubuntu-latest
