@@ -123,7 +123,7 @@ jobs:
         # Excludes requires_db/requires_redis too, not just integration — see Gotchas.
         run: uv run python -m pytest -m "not integration and not requires_db and not requires_redis"
         env:
-          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          DATABASE_URL: "postgresql+psycopg://test:test@localhost:5432/test"
           DATABASE_URL_PSYCOPG: "postgresql://test:test@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
           JWT_SECRET_KEY: "ci-dummy-secret-not-for-real-use"
@@ -160,6 +160,8 @@ jobs:
 ---
 
 ## Gotchas
+
+- **The dummy `DATABASE_URL` must use `+psycopg`, not `+asyncpg` — found on the second real PR run, after the extras fix above.** `db/base.py`'s `create_async_engine()` (imported transitively via `tests/conftest.py` → `api.dependencies` → `auth.dependencies` → `db.base`) uses SQLAlchemy's psycopg3 async dialect — `asyncpg` isn't a project dependency at all. A `postgresql+asyncpg://...` dummy URL (this doc's original value, never actually run against a `.env`-less environment before this phase) fails at *import* time with `ModuleNotFoundError: No module named 'asyncpg'`, before any test even runs — it doesn't need a reachable DB to fail, just the URL scheme parsed by SQLAlchemy's dialect loader. Fixed to `postgresql+psycopg://test:test@localhost:5432/test`. **Verified by properly simulating a no-`.env` CI environment locally**, not just by reasoning about it: temporarily renamed `backend/.env` aside, exported the four dummy env vars in the shell, ran the exact fast-tier command — 65/65 passed — then restored `.env`. A local run with `.env` present would never have caught this, since `python-dotenv`'s `load_dotenv()` doesn't override already-set env vars, but also doesn't get a chance to set `DATABASE_URL` at all if it's already correct from the real `.env` — the bug only surfaces when nothing but the dummy value is available, which is exactly CI's situation.
 
 - **`uv sync --extra dev --frozen` alone is not enough to even collect the fast tier — found on the first real PR run, not caught locally.** The first push of this workflow failed `backend` in 16s with `ModuleNotFoundError: No module named 'langgraph.checkpoint.postgres'`: `tests/conftest.py` imports `api.dependencies`, which imports `langgraph.checkpoint.postgres.aio` — a `prod`-extra package, not `dev`. It passed locally first because the local `.venv` already had `prod`/`eval` synced from earlier phases (`completed.md`'s Environment Reference: `uv sync --extra dev --extra prod --extra eval`), masking the gap. Reproduced the CI failure locally with `uv sync --extra dev --extra prod --frozen` (drops `eval`) → next failure, `ModuleNotFoundError: No module named 'ragas'`, from `tests/phase9_eval/test_dataset_and_metrics.py` needing `ragas` at collection time. `uv sync --extra dev --extra prod --extra eval --frozen` is what the fast tier actually needs — confirmed by running the full command fresh: 65/65 pass. **Lesson for verifying this kind of thing going forward**: a local pass with an already-populated `.venv` doesn't prove a clean-install command is sufficient; re-running the exact sync command CI uses (extras and all) against the same venv is what actually catches this class of gap before pushing.
 

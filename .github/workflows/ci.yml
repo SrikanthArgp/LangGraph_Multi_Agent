@@ -58,7 +58,11 @@ jobs:
           # construct Settings() during app/TestClient startup even in the fast tier, which
           # fails collection without these. Values are dummy — this tier never makes a real
           # DB/Redis connection with them.
-          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          # Must be +psycopg, not +asyncpg: db/base.py's create_async_engine() uses SQLAlchemy's
+          # psycopg3 async dialect (see its own comment on pgbouncer/prepared-statement
+          # behavior), and asyncpg isn't installed at all — a +asyncpg URL fails at import time
+          # with ModuleNotFoundError, not just at actual connection time. Found on a real PR run.
+          DATABASE_URL: "postgresql+psycopg://test:test@localhost:5432/test"
           DATABASE_URL_PSYCOPG: "postgresql://test:test@localhost:5432/test"
           REDIS_URL: "redis://localhost:6379/0"
           JWT_SECRET_KEY: "ci-dummy-secret-not-for-real-use"
