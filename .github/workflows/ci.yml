@@ -1,0 +1,110 @@
+# Phase 17 CI — lint + fast test tier for backend and frontend. No build/push/deploy here;
+# that's Phases 18/19. See ci-pipeline-steps.md for the full design/rationale.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same PR/branch instead of letting them queue.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "backend/uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (frozen)
+        # All three extras are needed even for the fast tier, not just dev: api/dependencies.py
+        # (imported transitively via tests/conftest.py) needs langgraph-checkpoint-postgres from
+        # prod, and tests/phase9_eval/test_dataset_and_metrics.py needs ragas from eval at
+        # collection time — confirmed by a clean `uv sync --extra dev --frozen` failing on both
+        # in CI/a fresh sync, even though it worked locally where prod/eval were already synced.
+        run: uv sync --extra dev --extra prod --extra eval --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Fast unit test tier
+        # Excludes requires_db/requires_redis too, not just integration: this job has no
+        # Postgres/Redis service running, so those tests fail on a real ConnectionError even
+        # though they aren't marked "integration" — confirmed by running locally with no
+        # services up (10 failures) vs. this exact marker expression (65 passed, no services
+        # needed, ~5s). See ci-pipeline-steps.md Gotchas.
+        run: uv run python -m pytest -m "not integration and not requires_db and not requires_redis"
+        env:
+          # config.py's Settings has four required (no-default) fields; some code paths
+          # construct Settings() during app/TestClient startup even in the fast tier, which
+          # fails collection without these. Values are dummy — this tier never makes a real
+          # DB/Redis connection with them.
+          # Must be +psycopg, not +asyncpg: db/base.py's create_async_engine() uses SQLAlchemy's
+          # psycopg3 async dialect (see its own comment on pgbouncer/prepared-statement
+          # behavior), and asyncpg isn't installed at all — a +asyncpg URL fails at import time
+          # with ModuleNotFoundError, not just at actual connection time. Found on a real PR run.
+          DATABASE_URL: "postgresql+psycopg://test:test@localhost:5432/test"
+          DATABASE_URL_PSYCOPG: "postgresql://test:test@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_SECRET_KEY: "ci-dummy-secret-not-for-real-use"
+          # Not settings.py-required fields, but still needed: multi_agent/chains/*.py
+          # instantiate ChatOpenAI(temperature=0) at *module import* time (not lazily), and
+          # multi_agent/nodes/web_search.py does the same for TavilySearchResults(k=3), whose
+          # api_wrapper field has an eager validator requiring TAVILY_API_KEY. Both are on the
+          # tests/conftest.py -> api.dependencies -> multi_agent.graph import chain, so even
+          # fast-tier tests that never call these chains still fail at collection without dummy
+          # values here. Neither key needs to be real — construction only, never invoked.
+          OPENAI_API_KEY: "sk-ci-dummy-not-a-real-key"
+          TAVILY_API_KEY: "tvly-ci-dummy-not-a-real-key"
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        # Default output mode ("standalone") — this job only proves the app compiles and
+        # type-checks; it isn't producing a deploy artifact. No env vars needed: the one
+        # runtime var frontend/next.config.ts reads (NEXT_OUTPUT_MODE) only matters for the
+        # Phase 15/16 static-export build, and NEXT_PUBLIC_API_BASE_URL being unset doesn't
+        # fail the build, it's just baked in as undefined.
+        run: npm run build

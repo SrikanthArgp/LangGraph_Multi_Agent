@@ -1,7 +1,6 @@
 import pytest
 from httpx import AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import api.dependencies as deps
