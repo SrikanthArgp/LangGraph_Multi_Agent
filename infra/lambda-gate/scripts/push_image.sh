@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds backend/Dockerfile (already carries the Lambda Web Adapter layer from Stage A) and
-# pushes it to the ECR repo Terraform provisioned (infra/ecr.tf's aws_ecr_repository.backend).
+# pushes it to the ECR repo Terraform provisioned (infra/lambda-gate/ecr.tf's aws_ecr_repository.backend).
 #
 # LocalStack quirk, verified empirically against this LocalStack Ultimate instance (a plain
 # `docker push localhost:4566/...` does NOT work — ECR is a real Docker Registry v2 API, not a
@@ -11,8 +11,8 @@
 # ECR uses the same repository_uri shape, just on the real `amazonaws.com` domain — so nothing
 # here is LocalStack-only except the endpoint host itself.
 #
-# Usage: infra/scripts/push_image.sh [image-tag]   (default tag: latest, matches
-#   var.backend_image_tag's default in infra/variables.tf — pass a new tag and re-run
+# Usage: infra/lambda-gate/scripts/push_image.sh [image-tag]   (default tag: latest, matches
+#   var.backend_image_tag's default in infra/lambda-gate/variables.tf — pass a new tag and re-run
 #   `tflocal apply -var="backend_image_tag=<tag>"` to roll out a new image)
 set -euo pipefail
 
@@ -31,7 +31,7 @@ REPO_URI=$(aws ecr describe-repositories \
   --output text)
 
 echo "Building backend image..."
-docker build -t crag-backend:"$TAG" "$(dirname "$0")/../../backend"
+docker build -t crag-backend:"$TAG" "$(dirname "$0")/../../../backend"
 
 echo "Tagging as $REPO_URI:$TAG"
 docker tag crag-backend:"$TAG" "$REPO_URI:$TAG"

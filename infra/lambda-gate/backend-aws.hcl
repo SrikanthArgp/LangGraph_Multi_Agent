@@ -6,6 +6,6 @@
 #
 #   terraform init -backend-config=backend-aws.hcl
 bucket         = "crag-terraform-state"    # TODO: confirm globally-unique name before Stage C
-key            = "crag/prod/terraform.tfstate"
+key            = "crag/prod/lambda-gate/terraform.tfstate" # scoped under this module's own prefix — infra/fargate/ uses a sibling key so the two root modules' state never collide
 region         = "us-east-1"               # TODO: confirm target region before Stage C
 dynamodb_table = "crag-terraform-locks"

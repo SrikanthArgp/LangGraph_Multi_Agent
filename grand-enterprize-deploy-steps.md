@@ -1,8 +1,8 @@
 # Phase 16 — AWS Container Deployment: ECS Fargate — Step-by-Step
 
-Scope: ECS Fargate (reusing Phase 15's ECR image minus the Lambda Web Adapter layer) + Application Load Balancer + simplified CloudFront (single ALB origin, no more Function-URL/HTTP-API split) + the same SSM/Upstash/Supabase choices as Phase 15, provisioned with Terraform, validated on LocalStack before real AWS. Full design/rationale lives in `plan.md`'s Phase 16 section and Key Design Decisions table — this doc is the execution checklist only. Companion to [`enterprize-deploy-steps.md`](./enterprize-deploy-steps.md) (Phase 15), which this phase builds directly on top of.
+Scope: ECS Fargate + Application Load Balancer + simplified CloudFront (single ALB origin, no more Function-URL/HTTP-API split) + the same Upstash/Supabase choices as Phase 15, provisioned with Terraform, validated on LocalStack before real AWS. Full design/rationale lives in `plan.md`'s Phase 16 section and Key Design Decisions table — this doc is the execution checklist only. Companion to [`enterprize-deploy-steps.md`](./enterprize-deploy-steps.md) (Phase 15), which this phase was originally planned to build directly on top of — **see the "Actually Built" section at the end of this doc**: that plan changed during implementation, this phase ended up fully independent of Phase 15's stack instead.
 
-Status: planning only, nothing built yet. Renumbered 2026-07-07 (this deploy target was formerly Phase 17) so both AWS deploy targets (Phase 15, this Phase 16) sit before the CI/CD phases (17–19) instead of interleaved with them. **Hard prerequisite: Phase 15 must already be applied at least once** — this phase reuses its ECR repo, SSM parameters, Upstash/Supabase config, and (optionally) its VPC. Don't start Phase 16 against a repo where Phase 15 hasn't been stood up.
+Status: **Stage A/B complete and verified end-to-end on LocalStack, including a real browser test — 2026-07-10.** Stage C (real AWS) not started. See `completed.md`'s Phase 16 entry for the authoritative record of what was actually built, including every deviation from this doc's original design and every real gap found; this doc's step lists below are left largely as originally written (the design intent going in), with the divergences called out explicitly in the "Actually Built" section at the end rather than silently edited in place. Renumbered 2026-07-07 (this deploy target was formerly Phase 17) so both AWS deploy targets (Phase 15, this Phase 16) sit before the CI/CD phases (17–19) instead of interleaved with them. **Note: the "hard prerequisite: Phase 15 must already be applied" line below describes the original plan, not what was built** — the built version has no dependency on `infra/lambda-gate/` at any layer (own ECR repo, own SSM parameters, own S3 bucket, own scripts). It does still reuse Phase 15's LocalStack Ultimate trial window, Upstash Redis instance, and Supabase Postgres connection — those genuinely are shared, just not through Terraform state or IAM.
 
 ---
 
@@ -34,13 +34,13 @@ flowchart TD
     end
 
     subgraph IAM["IAM"]
-        ExecRole["Task Execution Role\nECR pull + logs +\nssm:GetParameters + kms:Decrypt"]
-        TaskRole["Task Role\n(empty — no runtime AWS calls)"]
+        ExecRole["Task Execution Role\nECR pull + logs\n(as-built: no ssm/kms here)"]
+        TaskRole["Task Role\nssm:GetParameter + kms:Decrypt\n(as-built: app reads SSM at runtime via\nconfig.bootstrap_env(), same as Lambda —\nnot native task-def secrets injection)"]
     end
 
     subgraph Config["Config, Registry & Scaling"]
-        ECR["ECR Repository\n:ecs tag"]
-        SSM["SSM Parameter Store\n/crag/prod/* — native secrets injection"]
+        ECR["ECR Repository\nown repo, not shared with Phase 15\n(as-built: crag-prod-ecs-backend)"]
+        SSM["SSM Parameter Store\n/crag/prod-ecs/* — own params, read at\nruntime via config.bootstrap_env()\n(as-built, not native task-def injection)"]
         CW["CloudWatch Logs"]
         AutoScale["Application Auto Scaling\ntarget-tracking on CPU >70%"]
     end
@@ -58,10 +58,10 @@ flowchart TD
     TG --> Task
     Task -.->|protected by| TaskSG
     TaskSG -.->|allows only traffic from| ALBSG
-    Task -->|"pulls image, ships logs,\nresolves secrets as env vars"| ExecRole
-    Task -.->|"assumes, currently unused"| TaskRole
+    Task -->|"pulls image, ships logs"| ExecRole
+    Task -.->|"assumes; reads secrets at\nruntime via config.bootstrap_env()"| TaskRole
     ExecRole -.->|"ecr:BatchGetImage etc."| ECR
-    ExecRole -.->|"ssm:GetParameters\nkms:Decrypt"| SSM
+    TaskRole -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
     ExecRole -.->|"logs:PutLogEvents"| CW
     AutoScale -->|"adjusts desired count"| Service
     Task -->|"TLS, via IGW public IP"| Upstash
@@ -165,3 +165,22 @@ Fills in the permissions/roles/SGs/wiring left implicit in Stage A/B above, and 
 **Operator/CI permissions added for this phase** (on top of Phase 15's list — same principle, this is the human/CI identity running `terraform apply`, not a resource's own role): `ec2:*Vpc*`/`*Subnet*`/`*InternetGateway*`/`*RouteTable*`/`*SecurityGroup*` (Create/Describe/Delete) for the new networking; `ecs:*` for cluster/task-definition/service lifecycle; `elasticloadbalancing:*` for the ALB/target group/listener; `application-autoscaling:RegisterScalableTarget`/`PutScalingPolicy`; and again **`iam:PassRole`**, this time for both the task execution role and the task role, since Terraform hands both to the task definition at creation time.
 
 **Full wiring order:** VPC + 2 public subnets + IGW + route table → both security groups (ECS task SG's rule references the ALB SG's ID, so ALB SG must exist first) → task execution role + task role → ECS cluster → non-adapter image built and pushed to ECR under `:ecs` (script step) → task definition (needs both roles' ARNs + the image URI + SSM parameter ARNs for the `secrets` block) → target group → ALB (needs the two public subnets + ALB SG) → listener (needs ALB `arn` + target group `arn`) → ECS service (needs cluster + task definition + both subnets + ECS task SG + target group `arn` — this is what actually starts the task and registers it) → autoscaling target/policy (needs the service to exist) → CloudFront distribution updated to point its `/v1/*` origin at the ALB's `dns_name`, replacing Phase 15's Function-URL/API-Gateway origins outright.
+
+---
+
+## Actually Built (2026-07-10) — deviations from this doc's design, and real gaps found
+
+Everything above this section was written before implementation and is kept as-is (the original design intent, including the open questions and how they were expected to resolve). This section records what actually got built and why it diverged in three places, plus real gaps found along the way. `completed.md`'s Phase 16 entry is the fully detailed, authoritative record — this is a summary pointing at it.
+
+**Deviation 1 — full independence, not "Phase 15 must already be applied."** `infra/` was restructured into per-target Terraform roots (`infra/lambda-gate/` for Phase 15, `infra/fargate/` for this phase) specifically so each deploy target can be applied/destroyed/reasoned about independently — a shared ECR repo or a cross-stack SSM/IAM read would have reintroduced the exact coupling that split exists to remove. `infra/fargate/` has its own ECR repository (`ecr.tf`, `crag-prod-ecs-backend`), own SSM `SecureString` parameters (`ssm.tf`, path `/crag/prod-ecs/*`, own `secrets.auto.tfvars`), own S3 frontend bucket, and own `scripts/push_image.sh`/`sync_frontend.sh` — zero Terraform data sources, remote-state reads, or script paths into `infra/lambda-gate/`. Consequence: Stage A step 1's "add a second image build path that omits the Lambda Web Adapter layer" turned out unnecessary — the exact same image works unchanged for Fargate (the adapter layer is inert outside Lambda, already documented in `backend/Dockerfile`), so no `Dockerfile.ecs`/build-arg toggle was needed, just a separate `docker build` pushed to the separate repo under its own tag.
+
+**Deviation 2 — task-role runtime SSM read, not ECS-native `secrets` injection.** The "Open question — secret injection, resolved" section above calls for the ECS-native `secrets` block (task-definition-level SSM-to-env-var resolution via the execution role, no application code). Built the other way instead: the **task role** gets `ssm:GetParameter`/`kms:Decrypt`, and the container's `APP_ENV=production` + `SSM_PARAMETER_PREFIX=/crag/prod-ecs` env vars drive the exact same `config.bootstrap_env()` code path Lambda already uses — zero `config.py` changes, at the cost of not using the simpler native mechanism this doc had settled on. Worth reconsidering if the native-injection simplicity becomes valuable for its own sake later.
+
+**Deviation 3 — VPC and ALB-listener decisions matched this doc's "Resolved" sections exactly**, no deviation there: new minimal VPC (2 public subnets/2 AZs/IGW/no NAT), HTTP-only ALB listener on port 80 behind CloudFront.
+
+**Real gaps found, not assumed:**
+- **A bug in `infra/lambda-gate/`'s own scripts, unrelated to Fargate**: `push_image.sh`/`sync_frontend.sh`'s relative paths (`../../backend`, `../../frontend`) were never updated when `infra/` was renamed to `infra/lambda-gate/` earlier the same session — both silently resolved to a nonexistent `infra/backend`/`infra/frontend`. Caught by `realpath`-checking before assuming the scripts still worked. Fixed (`../../../`).
+- **A LocalStack-only CloudFront/ALB routing bug, real AWS is unaffected**: `custom_origin_config.http_port = 80` on the ALB origin (correct for real AWS) made LocalStack's CloudFront emulator try connecting directly to port 80 on the ALB's magic `*.elb.localhost.localstack.cloud` hostname — but LocalStack never binds port 80 (only 443 and the single edge port 4566), so the connection silently fell through to an unrelated internal handler (LocalStack's own EC2 IMDS route emulation) and returned a bogus 404. LocalStack's own container logs (`l.p.c.s.ec2.imds.routes : Path 'v1/health' not implemented`) pinpointed the cause. Fixed with the same conditional-port pattern `infra/lambda-gate/s3.tf` already uses for its identical API Gateway problem: `http_port = var.use_localstack ? 4566 : 80`.
+- **Two Phase-15-documented LocalStack gaps recurred identically here**, confirming they're systemic to LocalStack's CloudFront emulation, not one-offs: the CloudFront Function extensionless-URL rewrite still doesn't execute at request time under LocalStack (worked around with `.html` paths in ad-hoc testing, not "fixed" since Terraform itself is correct); the Git-Bash/MSYS env-var path-mangling bug recurred rebuilding the frontend, same `MSYS_NO_PATHCONV=1` fix.
+
+**Verified for real** (full detail in `completed.md`'s Phase 16 entry): `terraform apply` — 43 resources; ECS service `running=1`, ALB target `healthy`; a full `/v1/*` flow through CloudFront → ALB → the Fargate task (register → login → create session → a real chat/SSE stream, real CRAG graph run, real OpenAI answer, 26s, persisted to real Supabase Postgres); frontend built and synced, served correctly through CloudFront; a real Playwright browser E2E test (`chat.spec.ts`, via a throwaway copy + ad-hoc config, not the tracked suite) passed in 23.2s against the live CloudFront URL; the user separately confirmed the same URL working in a real desktop browser. **Not done**: Stage C (real AWS), the autoscaling load-test verification (step 17), the ALB-health-check-failure test (step 16), and `terraform destroy` (the 43 resources are still live on LocalStack as of this writing).

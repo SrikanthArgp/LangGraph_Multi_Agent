@@ -12,7 +12,7 @@
 # version (currently 1.15.7) expects, and swap accordingly. Flagging this rather than
 # asserting it, since it's the one thing here I can't verify without actually running init.
 bucket                      = "crag-terraform-state"
-key                         = "crag/prod/terraform.tfstate"
+key                         = "crag/prod/lambda-gate/terraform.tfstate" # scoped under this module's own prefix — infra/fargate/ uses a sibling key so the two root modules' state never collide
 region                      = "us-east-1"
 dynamodb_table              = "crag-terraform-locks"
 endpoint                    = "http://localhost:4566"

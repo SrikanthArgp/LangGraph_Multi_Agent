@@ -13,5 +13,5 @@ graph.png
 *.tfplan
 crash.log
 crash.*.log
-infra/secrets*.tfvars
+infra/**/secrets*.tfvars
 

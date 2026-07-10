@@ -9,6 +9,7 @@ terraform {
   }
 
   # No backend block here on purpose: this root's own state stays local. It creates the
-  # S3 bucket + DynamoDB table that infra/'s "s3" backend depends on, so it can't itself
-  # depend on a backend that doesn't exist yet.
+  # S3 bucket + DynamoDB table that every other infra/ root module's "s3" backend depends on
+  # (infra/lambda-gate/, infra/fargate/, ...), so it can't itself depend on a backend that
+  # doesn't exist yet.
 }

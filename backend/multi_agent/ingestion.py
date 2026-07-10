@@ -19,7 +19,7 @@ _CHROMA_SEED_DIR = Path(__file__).resolve().parent / ".chroma"
 # Lambda's root filesystem is read-only outside /tmp (real AWS and LocalStack's emulation both
 # enforce this) — Chroma's sqlite backend opens its file read-write even for pure reads, so the
 # baked-in _CHROMA_SEED_DIR can't be opened in place there. CHROMA_PERSIST_DIR (set in
-# infra/lambda.tf to /tmp/chroma) redirects to a writable copy instead; unset everywhere else
+# infra/lambda-gate/lambda.tf to /tmp/chroma) redirects to a writable copy instead; unset everywhere else
 # (local dev, Docker Compose, tests), so this is a no-op there and _CHROMA_SEED_DIR is used
 # directly, exactly as before.
 _runtime_dir = os.environ.get("CHROMA_PERSIST_DIR")

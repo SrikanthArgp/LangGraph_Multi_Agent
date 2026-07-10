@@ -312,7 +312,7 @@ flowchart TD
 
   <section class="diagram-section" id="phase-16">
     <h2>Phase 16 &mdash; AWS Container Deployment (ECS Fargate)</h2>
-    <p class="subtitle">Source: <code>grand-enterprize-deploy-steps.md</code></p>
+    <p class="subtitle">Source: <code>grand-enterprize-deploy-steps.md</code> &mdash; as-built, verified end-to-end on LocalStack 2026-07-10 (see that doc's "Actually Built" section for every deviation from the original design)</p>
     <div class="diagram-toolbar" data-toolbar-for="viewport-16">
       <button data-action="zoom-out" aria-label="Zoom out">&minus;</button>
       <span class="zoom-level">100%</span>
@@ -348,13 +348,13 @@ flowchart TD
     end
 
     subgraph IAM["IAM"]
-        ExecRole["Task Execution Role\nECR pull + logs +\nssm:GetParameters + kms:Decrypt"]
-        TaskRole["Task Role\n(empty - no runtime AWS calls)"]
+        ExecRole["Task Execution Role\nECR pull + logs\n(as-built: no ssm/kms here)"]
+        TaskRole["Task Role\nssm:GetParameter + kms:Decrypt\n(as-built: app reads SSM at runtime via\nconfig.bootstrap_env, same as Lambda -\nnot native task-def secrets injection)"]
     end
 
     subgraph Config["Config, Registry and Scaling"]
-        ECR["ECR Repository\n:ecs tag"]
-        SSM["SSM Parameter Store\n/crag/prod/* - native secrets injection"]
+        ECR["ECR Repository\nown repo, not shared with Phase 15\n(as-built: crag-prod-ecs-backend)"]
+        SSM["SSM Parameter Store\n/crag/prod-ecs/* - own params, read at\nruntime via config.bootstrap_env\n(as-built, not native task-def injection)"]
         CW["CloudWatch Logs"]
         AutoScale["Application Auto Scaling\ntarget-tracking on CPU greater than 70%"]
     end
@@ -372,10 +372,10 @@ flowchart TD
     TG --> Task
     Task -.->|protected by| TaskSG
     TaskSG -.->|allows only traffic from| ALBSG
-    Task -->|"pulls image, ships logs,\nresolves secrets as env vars"| ExecRole
-    Task -.->|"assumes, currently unused"| TaskRole
+    Task -->|"pulls image, ships logs"| ExecRole
+    Task -.->|"assumes; reads secrets at\nruntime via config.bootstrap_env"| TaskRole
     ExecRole -.->|"ecr:BatchGetImage etc."| ECR
-    ExecRole -.->|"ssm:GetParameters\nkms:Decrypt"| SSM
+    TaskRole -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
     ExecRole -.->|"logs:PutLogEvents"| CW
     AutoScale -->|"adjusts desired count"| Service
     Task -->|"TLS, via IGW public IP"| Upstash

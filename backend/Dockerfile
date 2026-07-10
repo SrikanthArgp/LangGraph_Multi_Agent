@@ -12,7 +12,7 @@ ENV PORT=8000
 
 # AWS_LWA_INVOKE_MODE deliberately NOT set here (defaults to the adapter's own "buffered" mode).
 # One Lambda *function* can only speak one invoke mode to the adapter, but this same image is
-# deployed as two separate functions in infra/lambda.tf — a plain one behind API Gateway
+# deployed as two separate functions in infra/lambda-gate/lambda.tf — a plain one behind API Gateway
 # (buffered) and a second with AWS_LWA_INVOKE_MODE=RESPONSE_STREAM set only via that function's
 # Terraform-level environment variables, behind the streaming Function URL. Baking RESPONSE_STREAM
 # in here broke the API-Gateway-fronted function: API Gateway's HTTP API integration always uses
