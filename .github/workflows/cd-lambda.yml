@@ -60,6 +60,14 @@ jobs:
       FUNCTION_NAME: crag-prod-backend
       STREAM_FUNCTION_NAME: crag-prod-backend-stream
       AWS_REGION: us-east-1
+      # Real gap found on the self-hosted (Git-Bash) runner: any `aws ... --name /crag/...`
+      # argument starting with "/" gets silently rewritten to a Windows path by MSYS's argv
+      # path-conversion before it reaches aws.exe, producing a nonsense parameter name and a
+      # confusing "can't be prefixed with ssm" validation error from the SSM API — nothing to do
+      # with the actual parameter. Same class of bug already documented in
+      # grand-enterprize-deploy-steps.md for frontend builds; ubuntu-latest is unaffected (no
+      # MSYS there), this only matters in localstack mode.
+      MSYS_NO_PATHCONV: "1"
       # Real gap found running this workflow for the first time: var.secrets (infra/lambda-gate/
       # variables.tf) has no default and Terraform requires it resolved before it will process
       # *any* resource, even a -target'd one — but secrets.auto.tfvars is gitignored and doesn't
