@@ -1,0 +1,171 @@
+# Phase 19 — CD: ECS Fargate. See cd-ecs-deploy-steps.md for full design/rationale.
+#
+# workflow_call only — no push/workflow_dispatch trigger of its own. Invoked by cd.yml when a
+# manual run selects target: fargate. Builds the same backend/Dockerfile Phase 18 builds (no
+# separate non-adapter variant needed — the Lambda Web Adapter layer is inert outside Lambda,
+# confirmed by infra/fargate/scripts/push_image.sh's own comment), pushes it to this stack's own
+# ECR repo, registers a new ECS task definition revision, and rolls the service over via
+# update-service --force-new-deployment (or terraform apply when infra/fargate/** changed).
+#
+# Supports two environments via inputs.environment, resolved by cd.yml — same shape as
+# cd-lambda.yml, see that file's header comment for the full rationale:
+#   - "aws"        (default): OIDC role assumption (cd-ecs-deploy-role, independent of Phase 18's
+#                   cd-lambda-deploy-role — no lambda:* permissions, no shared trust policy).
+#   - "localstack": dummy AWS creds, every AWS call routed at localhost:4566, self-hosted runner.
+name: CD - ECS Fargate
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit SHA to build and deploy, resolved by cd.yml (see cd-dispatcher-steps.md)"
+        required: true
+        type: string
+      environment:
+        description: "aws (OIDC, real deploy) or localstack (dummy creds, self-hosted runner)"
+        required: false
+        type: string
+        default: aws
+
+# Same reasoning as Phase 18: never cancel a run mid-deploy. A canceled register-task-definition/
+# update-service pair can leave the service pointed at a task definition revision that was never
+# fully rolled out. Scoped to inputs.sha, not github.ref, since this workflow has no
+# push-triggered ref of its own.
+concurrency:
+  group: cd-ecs-${{ inputs.sha }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required to mint the OIDC token in aws mode — also required on the *caller* job in cd.yml
+  contents: read
+
+env:
+  ECS_CLUSTER: crag-prod-ecs
+  ECS_SERVICE: crag-prod-ecs-backend
+  CONTAINER_NAME: backend
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.environment == 'localstack' && 'self-hosted' || 'ubuntu-latest' }}
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}   # NOT the implicit default — see cd-dispatcher-steps.md's sha-propagation note
+          fetch-depth: 2   # need the previous commit to diff infra/fargate/** against
+
+      - name: Detect infra changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            infra:
+              - 'infra/fargate/**'
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.environment != 'localstack'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cd-ecs-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (LocalStack)
+        if: inputs.environment == 'localstack'
+        run: |
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+
+      - name: Resolve ECR registry and log in
+        id: ecr
+        run: |
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            REGISTRY="000000000000.dkr.ecr.${{ env.AWS_REGION }}.localhost.localstack.cloud:4566"
+          else
+            REGISTRY="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          fi
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "$REGISTRY"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        env:
+          ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-prod-ecs-backend
+          IMAGE_TAG: ecs-${{ inputs.sha }}
+        run: |
+          docker build -t "$ECR_REPO:$IMAGE_TAG" -f backend/Dockerfile backend
+          docker push "$ECR_REPO:$IMAGE_TAG"
+
+      - name: Register new task definition revision
+        # Fast-path only — on the slow (terraform apply) path this can be the very first-ever
+        # deploy, with no existing task definition to fetch as a template.
+        if: steps.changes.outputs.infra == 'false'
+        id: register
+        env:
+          ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-prod-ecs-backend
+          IMAGE_TAG: ecs-${{ inputs.sha }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_SERVICE" \
+            --query 'taskDefinition' > current-task-def.json
+
+          NEW_IMAGE="$ECR_REPO:$IMAGE_TAG"
+          jq --arg IMAGE "$NEW_IMAGE" --arg NAME "$CONTAINER_NAME" \
+            '.containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end)
+             | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                   .compatibilities, .registeredAt, .registeredBy)' \
+            current-task-def.json > new-task-def.json
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$NEW_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy - fast path (image only)
+        if: steps.changes.outputs.infra == 'false'
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.register.outputs.task_def_arn }}" \
+            --force-new-deployment
+
+      - name: Deploy - full apply (infra changed)
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/fargate
+        env:
+          TF_VAR_backend_image_tag: ecs-${{ inputs.sha }}
+        run: |
+          BACKEND_CONFIG=backend-aws.hcl
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            BACKEND_CONFIG=backend-localstack.hcl
+          fi
+          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
+          terraform apply -auto-approve
+
+      - name: Wait for service stability
+        timeout-minutes: 10
+        run: |
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+      - name: Look up current CloudFront domain
+        # This stack's own SSM parameter, not Phase 18's — infra/fargate/ provisions an
+        # independent CloudFront distribution from infra/lambda-gate/'s. See
+        # cd-dispatcher-steps.md's "GitHub Repository Configuration" section.
+        id: domain
+        run: |
+          DOMAIN=$(aws ssm get-parameter --name /crag/prod-ecs/cloudfront_domain --query 'Parameter.Value' --output text)
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke check
+        run: |
+          curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
+
+      # No explicit rollback step here, unlike cd-lambda.yml — infra/fargate/ecs.tf's
+      # deployment_circuit_breaker (enable = true, rollback = true) handles it natively at the
+      # ECS-service level, reverting to the last known-good task definition revision if the new
+      # one keeps failing its health check. See cd-ecs-deploy-steps.md step 9 and its "circuit
+      # breaker vs. this workflow's smoke check can disagree" Gotcha — a green ECS deploy that
+      # still fails the smoke check above is a real signal, not noise, even with no rollback here.

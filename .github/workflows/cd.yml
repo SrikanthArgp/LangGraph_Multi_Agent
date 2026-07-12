@@ -1,0 +1,68 @@
+# CD Dispatcher (Phase 18/19) — see cd-dispatcher-steps.md for full design/rationale.
+#
+# workflow_dispatch-only for now (dev-phase decision, 2026-07-11) — no automatic trigger off
+# ci.yml going green. Deploying on every merge removes the manual control wanted during active
+# development; see cd-dispatcher-steps.md's "Deferred: Adding the Automatic Trigger Later".
+name: CD - Dispatcher
+
+# `eks`/`all` are added to target's options once Phase 21's cd-eks.yml exists — see the commented
+# deploy-eks job below for the exact shape when that day comes.
+#
+# `environment` isn't part of the original dispatcher design — added so this dispatcher can drive
+# a LocalStack run (self-hosted runner, dummy creds) as well as a real-AWS run (OIDC,
+# ubuntu-latest), since neither Phase 15 nor 16 had a way to exercise their own Terraform applies
+# as an actual GitHub Actions run. See cd-lambda.yml/cd-ecs.yml's own header comments.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which deploy target(s) to run"
+        required: true
+        type: choice
+        options:
+          - lambda
+          - fargate
+          - both
+        default: both
+      environment:
+        description: "Deploy environment"
+        required: true
+        type: choice
+        options:
+          - aws
+          - localstack
+        default: aws
+
+jobs:
+  deploy-lambda:
+    if: inputs.target == 'lambda' || inputs.target == 'both'
+    permissions:
+      id-token: write   # required on the caller job, in addition to the callee's own permissions block
+      contents: read
+    uses: ./.github/workflows/cd-lambda.yml
+    with:
+      sha: ${{ github.sha }}
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+
+  deploy-ecs:
+    if: inputs.target == 'fargate' || inputs.target == 'both'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/cd-ecs.yml
+    with:
+      sha: ${{ github.sha }}
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+
+  # Added when Phase 21 is built — not present yet:
+  # deploy-eks:
+  #   if: inputs.target == 'eks' || inputs.target == 'all'
+  #   permissions:
+  #     id-token: write
+  #     contents: write   # cd-eks.yml's bot commit needs this, not just id-token
+  #   uses: ./.github/workflows/cd-eks.yml
+  #   with:
+  #     sha: ${{ github.sha }}
+  #   secrets: inherit

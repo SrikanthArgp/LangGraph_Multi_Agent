@@ -1,0 +1,177 @@
+# Phase 18 — CD: Lambda. See cd-lambda-deploy-steps.md for full design/rationale.
+#
+# workflow_call only — no push/workflow_dispatch trigger of its own. Invoked by cd.yml when a
+# manual run selects target: lambda. Builds the Lambda-Web-Adapter image (backend/Dockerfile,
+# already carries the adapter layer from Phase 15 Stage A), pushes it to ECR, and rolls it out
+# to both Lambda functions infra/lambda-gate/lambda.tf provisions (the buffered `backend`
+# function behind API Gateway, and the RESPONSE_STREAM `backend_stream` function behind its own
+# Function URL — same image, see lambda.tf's own comment on why there are two).
+#
+# Supports two environments via inputs.environment, resolved by cd.yml:
+#   - "aws"        (default): OIDC role assumption (cd-lambda-deploy-role, not yet created in
+#                   any real account), runs on ubuntu-latest. This is the path documented in
+#                   cd-lambda-deploy-steps.md and is what real deploys will use once Phase 15's
+#                   Stage C exists.
+#   - "localstack": dummy AWS creds, every AWS call routed at localhost:4566 via AWS_ENDPOINT_URL,
+#                   runs on a self-hosted runner (GitHub-hosted runners can't reach localhost on
+#                   this machine). Added specifically to exercise this workflow end to end against
+#                   LocalStack, since neither Phase 15 nor 16 had a way to do that for their own
+#                   Terraform applies — those ran locally, this runs as a real Actions workflow.
+name: CD - Lambda
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit SHA to build and deploy, resolved by cd.yml (see cd-dispatcher-steps.md)"
+        required: true
+        type: string
+      environment:
+        description: "aws (OIDC, real deploy) or localstack (dummy creds, self-hosted runner)"
+        required: false
+        type: string
+        default: aws
+
+# Unlike Phase 17's CI, do NOT cancel-in-progress here — canceling mid-deploy can leave a Lambda
+# function on a half-applied image or an in-progress Terraform apply. Queue instead; deploys are
+# rare enough that serializing them costs nothing. Scoped to inputs.sha, not github.ref, since
+# this workflow has no push-triggered ref of its own.
+concurrency:
+  group: cd-lambda-${{ inputs.sha }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required to mint the OIDC token in aws mode — also required on the *caller* job in cd.yml
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.environment == 'localstack' && 'self-hosted' || 'ubuntu-latest' }}
+    env:
+      FUNCTION_NAME: crag-prod-backend
+      STREAM_FUNCTION_NAME: crag-prod-backend-stream
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}   # NOT the implicit default — see cd-dispatcher-steps.md's sha-propagation note
+          fetch-depth: 2   # need the previous commit to diff infra/lambda-gate/** against
+
+      - name: Detect infra changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            infra:
+              - 'infra/lambda-gate/**'
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.environment != 'localstack'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cd-lambda-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (LocalStack)
+        # Dummy creds LocalStack accepts unconditionally, plus AWS_ENDPOINT_URL (global as of
+        # aws-cli 2.13+) so every aws CLI call below routes to localhost:4566 with no per-command
+        # --endpoint-url needed. Exported via GITHUB_ENV so later steps inherit them too.
+        if: inputs.environment == 'localstack'
+        run: |
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+
+      - name: Resolve ECR registry and log in
+        # One shell step for both environments rather than aws-actions/amazon-ecr-login, which
+        # only knows how to construct a real-AWS registry hostname. LocalStack's registry is a
+        # fixed, well-known shape (account 000000000000, *.localhost.localstack.cloud, resolvable
+        # via LocalStack's own public DNS — see infra/lambda-gate/scripts/push_image.sh's comment)
+        # rather than something an ECR API call can discover the way the real registry can.
+        id: ecr
+        run: |
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            REGISTRY="000000000000.dkr.ecr.${{ env.AWS_REGION }}.localhost.localstack.cloud:4566"
+          else
+            REGISTRY="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          fi
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "$REGISTRY"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        env:
+          ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-backend
+          IMAGE_TAG: ${{ inputs.sha }}
+        run: |
+          docker build -t "$ECR_REPO:$IMAGE_TAG" -f backend/Dockerfile backend
+          docker push "$ECR_REPO:$IMAGE_TAG"
+
+      - name: Record previous image digests (for rollback)
+        # Fast-path only — on the slow (terraform apply) path this can be the very first-ever
+        # deploy (no function exists yet to query), and Terraform's own state is the source of
+        # truth for what was previously applied, not a saved image digest.
+        if: steps.changes.outputs.infra == 'false'
+        id: previous
+        run: |
+          aws lambda get-function --function-name "$FUNCTION_NAME" \
+            --query 'Code.ImageUri' --output text > previous_image_uri.txt
+          aws lambda get-function --function-name "$STREAM_FUNCTION_NAME" \
+            --query 'Code.ImageUri' --output text > previous_stream_image_uri.txt
+          echo "uri=$(cat previous_image_uri.txt)" >> "$GITHUB_OUTPUT"
+          echo "stream_uri=$(cat previous_stream_image_uri.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy - fast path (image only)
+        if: steps.changes.outputs.infra == 'false'
+        env:
+          ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-backend
+          IMAGE_TAG: ${{ inputs.sha }}
+        run: |
+          aws lambda update-function-code --function-name "$FUNCTION_NAME" \
+            --image-uri "$ECR_REPO:$IMAGE_TAG"
+          aws lambda update-function-code --function-name "$STREAM_FUNCTION_NAME" \
+            --image-uri "$ECR_REPO:$IMAGE_TAG"
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+          aws lambda wait function-updated --function-name "$STREAM_FUNCTION_NAME"
+
+      - name: Deploy - full apply (infra changed)
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/lambda-gate
+        env:
+          TF_VAR_backend_image_tag: ${{ inputs.sha }}
+        run: |
+          BACKEND_CONFIG=backend-aws.hcl
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            BACKEND_CONFIG=backend-localstack.hcl
+          fi
+          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
+          terraform apply -auto-approve
+
+      - name: Look up current CloudFront domain
+        # Not a GitHub Variable — this project has no custom domain, so the
+        # auto-generated *.cloudfront.net (or, on LocalStack, *.cloudfront.localhost.localstack.cloud)
+        # hostname changes on every terraform destroy/reapply. Read fresh from SSM instead. See
+        # cd-dispatcher-steps.md's "GitHub Repository Configuration" section.
+        id: domain
+        run: |
+          DOMAIN=$(aws ssm get-parameter --name /crag/prod/cloudfront_domain --query 'Parameter.Value' --output text)
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke check
+        id: smoke
+        run: |
+          curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
+
+      - name: Rollback on failed smoke check
+        # Fast-path only — see the "Record previous image digests" step's comment. The slow path
+        # has no saved digest to roll back to here; a broken infra-changed deploy is corrected by
+        # fixing forward and re-running, same as any other Terraform apply failure.
+        if: failure() && steps.smoke.outcome == 'failure' && steps.changes.outputs.infra == 'false'
+        run: |
+          aws lambda update-function-code --function-name "$FUNCTION_NAME" \
+            --image-uri "${{ steps.previous.outputs.uri }}"
+          aws lambda update-function-code --function-name "$STREAM_FUNCTION_NAME" \
+            --image-uri "${{ steps.previous.outputs.stream_uri }}"
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+          aws lambda wait function-updated --function-name "$STREAM_FUNCTION_NAME"

@@ -1,3 +1,7 @@
+# Comment-only touch (2026-07-12): no resource change. infra/lambda-gate/** needed a real diff
+# so cd-lambda.yml's paths-filter step would take its terraform-apply path on the first-ever run
+# against a from-scratch LocalStack instance (there is no existing function for the fast
+# update-function-code path to target yet) — see completed.md's Phase 18 CD-verification entry.
 locals {
   function_name        = "${var.project_name}-${var.environment}-backend"
   stream_function_name = "${var.project_name}-${var.environment}-backend-stream"

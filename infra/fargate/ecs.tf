@@ -77,6 +77,16 @@ resource "aws_ecs_service" "backend" {
   # failures against it.
   health_check_grace_period_seconds = 30
 
+  # Matters more here than it would elsewhere in this plan: this service runs at desired_count 1
+  # (plan.md's explicit cost/availability tradeoff), so a bad deploy has no healthy replica to
+  # hide behind. A task that keeps failing its ALB health check gets auto-reverted to the last
+  # known-good task definition revision without waiting for cd-ecs.yml's own smoke check to
+  # notice — see cd-ecs-deploy-steps.md's "Why a new task definition revision every time" section.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   depends_on = [aws_lb_listener.http]
 }
 
