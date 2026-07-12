@@ -241,6 +241,22 @@ resource "aws_cloudfront_distribution" "this" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.forward_all_except_host.id
   }
 
+  # api/main.py mounts /health deliberately outside the /v1 prefix (standard practice for health
+  # checks), so it never matched the /v1/* behavior above and fell through to the S3 frontend
+  # origin's default_cache_behavior — a 404 NoSuchKey, not a real health-check failure. Found by
+  # cd-lambda.yml's smoke check actually hitting /health through this distribution for the first
+  # time; every prior verification session tested /health directly against the origin instead
+  # (see completed.md's Phase 15/16 entries), never through CloudFront.
+  ordered_cache_behavior {
+    path_pattern             = "/health"
+    target_origin_id         = "apigw"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = aws_cloudfront_cache_policy.no_cache.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.forward_all_except_host.id
+  }
+
   restrictions {
     geo_restriction {
       restriction_type = "none"
