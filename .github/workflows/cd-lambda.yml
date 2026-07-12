@@ -209,11 +209,15 @@ jobs:
           curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
 
       - name: Set up Node
+        # No `cache: npm` — its post-job cache-save step (tars node_modules cache) is a real gap
+        # found running this on the self-hosted LocalStack runner: a single Windows dev machine
+        # doing terraform+docker+npm work at once occasionally loses connectivity to the Actions
+        # service mid-tar, and a failed post-job step marks the whole job red even though every
+        # real deploy step (terraform apply, image build/push, smoke check, frontend sync) already
+        # succeeded. Not worth the flakiness for the few seconds `npm ci` saves here.
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend deps
         working-directory: frontend
