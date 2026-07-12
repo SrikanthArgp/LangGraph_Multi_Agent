@@ -2,6 +2,9 @@
 # so cd-lambda.yml's paths-filter step would take its terraform-apply path on the first-ever run
 # against a from-scratch LocalStack instance (there is no existing function for the fast
 # update-function-code path to target yet) — see completed.md's Phase 18 CD-verification entry.
+# dorny/paths-filter diffs only the latest commit here (no push before/after context on a
+# workflow_call trigger), so this file needs re-touching alongside each cd-lambda.yml fix commit
+# during this same verification pass, until the first full apply actually lands.
 locals {
   function_name        = "${var.project_name}-${var.environment}-backend"
   stream_function_name = "${var.project_name}-${var.environment}-backend-stream"
