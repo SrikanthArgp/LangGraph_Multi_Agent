@@ -5,12 +5,8 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
 
 # Cancel superseded runs on the same PR/branch instead of letting them queue.
 concurrency:
@@ -18,7 +14,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Gates backend/frontend on whether anything other than a doc file changed, rather than using
+  # paths-ignore on the triggers above. Deliberate: paths-ignore at the trigger level means the
+  # workflow never runs at all for a doc-only push/PR — and backend/frontend are required status
+  # checks on main (confirmed via the branch protection API), so a required check with no run to
+  # report against sits "Expected" forever and blocks merge. A job-level `if:` skip instead still
+  # runs the workflow (satisfying the required check) but reports the job as skipped, which
+  # GitHub treats as passing rather than blocking.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+
   backend:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -81,6 +100,8 @@ jobs:
           TAVILY_API_KEY: "tvly-ci-dummy-not-a-real-key"
 
   frontend:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
