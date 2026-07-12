@@ -90,7 +90,8 @@ resource "aws_ecs_service" "backend" {
   # Comment-only touch (2026-07-12): dorny/paths-filter diffs only the latest commit on a
   # workflow_call trigger (no push before/after context), so this file needs re-touching
   # alongside each cd-ecs.yml fix commit during this same verification pass, until the first
-  # full apply actually lands — see infra/lambda-gate/lambda.tf's matching comment.
+  # full apply actually lands — see infra/lambda-gate/lambda.tf's matching comment. (iteration 2:
+  # added TF_VAR_secrets, sourced from a new LOCALSTACK_SECRETS_JSON repo Secret.)
 
   depends_on = [aws_lb_listener.http]
 }

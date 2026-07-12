@@ -55,6 +55,9 @@ jobs:
         shell: bash
     env:
       AWS_REGION: us-east-1
+      # See cd-lambda.yml's identical comment — var.secrets (infra/fargate/variables.tf) has no
+      # default and secrets.auto.tfvars is gitignored, so it's not present on a fresh checkout.
+      TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

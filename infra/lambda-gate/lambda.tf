@@ -4,7 +4,8 @@
 # update-function-code path to target yet) — see completed.md's Phase 18 CD-verification entry.
 # dorny/paths-filter diffs only the latest commit here (no push before/after context on a
 # workflow_call trigger), so this file needs re-touching alongside each cd-lambda.yml fix commit
-# during this same verification pass, until the first full apply actually lands.
+# during this same verification pass, until the first full apply actually lands. (iteration 2:
+# added TF_VAR_secrets, sourced from a new LOCALSTACK_SECRETS_JSON repo Secret.)
 locals {
   function_name        = "${var.project_name}-${var.environment}-backend"
   stream_function_name = "${var.project_name}-${var.environment}-backend-stream"
