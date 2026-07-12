@@ -186,8 +186,13 @@ jobs:
           echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
 
       - name: Smoke check
+        # Real gap found on a fast-path (image-only) redeploy: `aws ecs wait services-stable`
+        # above only confirms the ECS task itself is ready — the ALB target group / CloudFront's
+        # connection to it can lag a few more seconds behind that on LocalStack, and the previous
+        # 5-retry/3s budget (~15-18s) wasn't always enough to cover it (confirmed transient: the
+        # identical curl succeeded seconds later run by hand). Widened to absorb that gap.
         run: |
-          curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
+          curl -sf --retry 10 --retry-delay 5 "https://${{ steps.domain.outputs.domain }}/health"
 
       - name: Set up Node
         # See cd-lambda.yml's identical comment — no `cache: npm`, its post-job cache-save step
