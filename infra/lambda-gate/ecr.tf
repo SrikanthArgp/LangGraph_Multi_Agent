@@ -36,6 +36,11 @@
 # aws_apigatewayv2_stage.default and aws_cloudfront_function.url_rewrite were both created before
 # the batch of errors surfaced, confirming Terraform validates/reads the whole plan rather than
 # stopping at the first resource that fails.
+#
+# A fifth gap, next retry: every resource applied successfully except the SSM secret parameters'
+# tag read-back, which needed ssm:GetParameters (plural, batch-get — a distinct IAM action from
+# ssm:GetParameter singular) that SSM's ListTagsForResource calls internally. Fixed in
+# infra/bootstrap/github-oidc.tf.
 resource "aws_ecr_repository" "backend" {
   name                 = "${var.project_name}-backend"
   image_tag_mutability = "MUTABLE"
