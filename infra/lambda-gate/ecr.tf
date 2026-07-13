@@ -69,6 +69,10 @@ data "aws_caller_identity" "current" {}
 # repository policy above existed, but failed on the post-create version read-back
 # (lambda:ListVersionsByFunction, missing from the deploy role's IAM policy — fixed in
 # infra/bootstrap/github-oidc.tf).
+#
+# An eighth gap, next retry: got through the S3 bucket policy and CloudFront-domain SSM parameter
+# too, failing only on the two aws_lambda_permission resources' read-back (lambda:GetPolicy,
+# also fixed in infra/bootstrap/github-oidc.tf).
 resource "aws_ecr_repository_policy" "backend" {
   repository = aws_ecr_repository.backend.name
   policy = jsonencode({
