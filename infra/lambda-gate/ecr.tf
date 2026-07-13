@@ -41,6 +41,11 @@
 # tag read-back, which needed ssm:GetParameters (plural, batch-get — a distinct IAM action from
 # ssm:GetParameter singular) that SSM's ListTagsForResource calls internally. Fixed in
 # infra/bootstrap/github-oidc.tf.
+#
+# A sixth gap, next retry: that same failed attempt left aws_iam_role.lambda_exec tainted (create
+# succeeded, a later read in the same apply errored), forcing a destroy+recreate on this retry —
+# which itself needed iam:ListInstanceProfilesForRole, also fixed in
+# infra/bootstrap/github-oidc.tf.
 resource "aws_ecr_repository" "backend" {
   name                 = "${var.project_name}-backend"
   image_tag_mutability = "MUTABLE"
