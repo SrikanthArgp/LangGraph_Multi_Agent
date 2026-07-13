@@ -113,12 +113,23 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
       { Effect = "Allow", Action = ["cloudfront:*"], Resource = "*" },
       {
         Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DescribeLogGroups", "logs:TagResource", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]
+        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:TagResource", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]
         Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/crag-prod-backend*"
       },
+      # logs:DescribeLogGroups and ssm:DescribeParameters are both account/region-wide List-style
+      # APIs — AWS doesn't support resource-level restriction for either at all (confirmed by the
+      # first real apply: scoping DescribeLogGroups to a specific log-group ARN was denied
+      # outright, not just under-scoped), so they can't join the resource-scoped statements above.
+      { Effect = "Allow", Action = ["logs:DescribeLogGroups"], Resource = "*" },
+      { Effect = "Allow", Action = ["ssm:DescribeParameters"], Resource = "*" },
       {
+        # s3:Get*/s3:List* rather than enumerating individual read calls — the AWS provider's
+        # aws_s3_bucket refresh hits a wide, version-dependent set of Get* sub-APIs (ACL, tagging,
+        # versioning, CORS, etc.) regardless of which of those are actually configured on the
+        # resource; found missing s3:GetBucketAcl specifically on the first real apply, and
+        # narrowing this further just risks the same one-at-a-time gap on the next attribute.
         Effect   = "Allow"
-        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:GetBucketPolicy", "s3:GetBucketTagging", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
+        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:Get*", "s3:List*"]
         Resource = ["arn:aws:s3:::crag-prod-frontend", "arn:aws:s3:::crag-prod-frontend/*"]
       },
       {
@@ -131,7 +142,7 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
         # Needed only on the full-apply (infra-changed) path — Terraform re-asserts
         # lambda_exec's role on every apply, even when the role itself is unchanged.
         Effect   = "Allow"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
         Resource = "arn:aws:iam::*:role/crag-prod-lambda-exec"
       },
     ]
@@ -228,12 +239,16 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
       { Effect = "Allow", Action = ["cloudfront:*"], Resource = "*" },
       {
         Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DescribeLogGroups", "logs:TagResource", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]
+        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:TagResource", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]
         Resource = "arn:aws:logs:*:*:log-group:/ecs/crag-prod-ecs*"
       },
+      # See infra/lambda-gate's identical statements/comment above — DescribeLogGroups and
+      # DescribeParameters don't support resource-level restriction at all.
+      { Effect = "Allow", Action = ["logs:DescribeLogGroups"], Resource = "*" },
+      { Effect = "Allow", Action = ["ssm:DescribeParameters"], Resource = "*" },
       {
         Effect   = "Allow"
-        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:GetBucketPolicy", "s3:GetBucketTagging", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
+        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:Get*", "s3:List*"]
         Resource = ["arn:aws:s3:::crag-prod-ecs-frontend", "arn:aws:s3:::crag-prod-ecs-frontend/*"]
       },
       {
@@ -244,7 +259,7 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
       {
         Effect   = "Allow"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
         Resource = ["arn:aws:iam::*:role/crag-prod-ecs-execution", "arn:aws:iam::*:role/crag-prod-ecs-task"]
       },
       {
