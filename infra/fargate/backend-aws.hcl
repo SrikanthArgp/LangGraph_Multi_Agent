@@ -6,7 +6,7 @@
 # infra/lambda-gate/backend-aws.hcl ends up using, since both point at the same bucket.
 #
 #   terraform init -backend-config=backend-aws.hcl
-bucket         = "crag-terraform-state"    # TODO: confirm globally-unique name before real AWS
+bucket         = "crag-terraform-state-247673029324" # account-ID-suffixed for global S3-bucket-name uniqueness, per infra/bootstrap/ apply on 2026-07-13
 key            = "crag/prod/fargate/terraform.tfstate" # sibling key to infra/lambda-gate/'s "crag/prod/lambda-gate/terraform.tfstate" — same bucket, never the same object
-region         = "us-east-1"               # TODO: confirm target region before real AWS
+region         = "us-east-1"
 dynamodb_table = "crag-terraform-locks"

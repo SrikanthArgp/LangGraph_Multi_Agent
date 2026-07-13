@@ -57,7 +57,8 @@ jobs:
       AWS_REGION: us-east-1
       # See cd-lambda.yml's identical comment — var.secrets (infra/fargate/variables.tf) has no
       # default and secrets.auto.tfvars is gitignored, so it's not present on a fresh checkout.
-      TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || '' }}
+      # AWS_SECRETS_JSON is this stack's own real-AWS answer — see real-aws-cicd-setup.md Step 5.
+      TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || secrets.AWS_SECRETS_JSON }}
       # See cd-lambda.yml's identical comment — MSYS argv path-conversion mangles any
       # `--name /crag/...` argument on this Git-Bash self-hosted runner.
       MSYS_NO_PATHCONV: "1"

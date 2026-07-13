@@ -71,11 +71,10 @@ jobs:
       # Real gap found running this workflow for the first time: var.secrets (infra/lambda-gate/
       # variables.tf) has no default and Terraform requires it resolved before it will process
       # *any* resource, even a -target'd one — but secrets.auto.tfvars is gitignored and doesn't
-      # exist on a fresh runner checkout. LOCALSTACK_SECRETS_JSON is a repo Secret holding the
-      # same JSON shape as that file's `secrets = { ... }` map, added specifically to unblock
-      # LocalStack testing — real AWS deploys still need their own answer to this (not yet
-      # designed; see completed.md's Phase 18 entry).
-      TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || '' }}
+      # exist on a fresh runner checkout. LOCALSTACK_SECRETS_JSON/AWS_SECRETS_JSON are repo
+      # Secrets holding the same JSON shape as that file's `secrets = { ... }` map — see
+      # real-aws-cicd-setup.md Step 5 for how AWS_SECRETS_JSON was created and wired in.
+      TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || secrets.AWS_SECRETS_JSON }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -5,7 +5,7 @@
 # very likely need a suffix (account ID, random string) at that point.
 #
 #   terraform init -backend-config=backend-aws.hcl
-bucket         = "crag-terraform-state"    # TODO: confirm globally-unique name before Stage C
+bucket         = "crag-terraform-state-247673029324" # account-ID-suffixed for global S3-bucket-name uniqueness, per infra/bootstrap/ apply on 2026-07-13
 key            = "crag/prod/lambda-gate/terraform.tfstate" # scoped under this module's own prefix — infra/fargate/ uses a sibling key so the two root modules' state never collide
-region         = "us-east-1"               # TODO: confirm target region before Stage C
+region         = "us-east-1"
 dynamodb_table = "crag-terraform-locks"
