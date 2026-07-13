@@ -7,7 +7,9 @@ provider "aws" {
   # only exists in this dev machine's own ~/.aws/config, not on an ephemeral ubuntu-latest CD
   # runner authenticating via OIDC-minted env-var credentials. Failed with "loading configuration:
   # failed to get shared config profile, localstack". Only ever worked for LocalStack CI runs by
-  # coincidence, since the self-hosted runner is this same dev machine.
+  # coincidence, since the self-hosted runner is this same dev machine. Root cause was one layer
+  # deeper still: cd-lambda.yml/cd-ecs.yml never set TF_VAR_use_localstack at all, so this
+  # variable itself silently defaulted to true on every real-AWS run too — fixed alongside this.
   profile = var.use_localstack ? var.aws_profile : null
 
   # See infra/bootstrap/main.tf's provider block for what each of these does — identical
