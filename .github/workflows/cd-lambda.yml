@@ -107,6 +107,18 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
           echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
 
+      - name: Setup Terraform
+        # Real gap found running this workflow on ubuntu-latest for the first time (the
+        # self-hosted Windows runner used for every prior LocalStack run already had Terraform
+        # installed locally, so this was never exercised there): ubuntu-latest ships no
+        # Terraform binary at all, unlike some other CLIs GitHub's runner images bundle.
+        # `terraform: command not found` (exit 127) at the first `terraform init` call. Pinned
+        # to 1.15.7 to match what's already used everywhere else in this repo (see
+        # infra/lambda-gate/backend-localstack.hcl's comment).
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.7
+
       - name: Terraform init (infra changed)
         if: steps.changes.outputs.infra == 'true'
         working-directory: infra/lambda-gate
