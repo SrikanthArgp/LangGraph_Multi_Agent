@@ -1,5 +1,12 @@
-# Same-account Lambda pulls need no repository policy (see enterprize-deploy-steps.md's
-# wiring table) — only cross-account pulls would.
+# CORRECTION (2026-07-13, real real-AWS apply): the header comment here used to claim
+# "Same-account Lambda pulls need no repository policy — only cross-account pulls would." That's
+# wrong. aws_lambda_function.backend/.backend_stream both failed to create with "Lambda does not
+# have permission to access the ECR image. Check the ECR permissions." — a real AWS-side check
+# distinct from any IAM identity policy (our deploy role's own ECR permissions were already
+# sufficient; this is Lambda's control plane checking the repository's own resource policy before
+# it will let the Lambda service pull the image), and it applies within the same account too.
+# Fixed below with aws_ecr_repository_policy.backend, granting principal lambda.amazonaws.com
+# pull access scoped to this account's Lambda functions.
 #
 # LocalStack instances are ephemeral — a restarted/reset one has none of this stack's resources,
 # even though this repo's git state (and Terraform's remote state, once infra/bootstrap/ is
@@ -51,4 +58,24 @@ resource "aws_ecr_repository" "backend" {
   image_tag_mutability = "MUTABLE"
 
   force_delete = var.use_localstack
+}
+
+data "aws_caller_identity" "current" {}
+
+# See the header comment above — required even for same-account Lambda pulls, not just
+# cross-account ones.
+resource "aws_ecr_repository_policy" "backend" {
+  repository = aws_ecr_repository.backend.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "AllowLambdaPull"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+      Condition = {
+        StringEquals = { "aws:sourceAccount" = data.aws_caller_identity.current.account_id }
+      }
+    }]
+  })
 }

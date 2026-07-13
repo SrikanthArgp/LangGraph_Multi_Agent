@@ -81,6 +81,10 @@ resource "aws_iam_role_policy" "cd_lambda_ecr" {
           "ecr:TagResource", "ecr:ListTagsForResource",
           "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
           "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload",
+          # Needed for aws_ecr_repository_policy.backend (ecr.tf) — granting the Lambda service
+          # itself pull access, a real requirement found on the first full apply (see ecr.tf's
+          # header comment), not present in the original design.
+          "ecr:SetRepositoryPolicy", "ecr:GetRepositoryPolicy", "ecr:DeleteRepositoryPolicy",
         ]
         Resource = "arn:aws:ecr:*:*:repository/crag-backend"
       }
