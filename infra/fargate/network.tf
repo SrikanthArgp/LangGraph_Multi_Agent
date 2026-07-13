@@ -17,6 +17,13 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+# Re-touched (no content change) to force paths-filter's slow-path detection on the next
+# cd-ecs.yml dispatch — same recurring single-commit-diff gap documented in ecr.tf. The prior
+# full apply got partway (security group created, old task definition destroyed) before failing
+# on a missing IAM permission (see infra/bootstrap/github-oidc.tf's cd_ecs_compute fix), and the
+# fix commit itself didn't touch infra/fargate/**, so this stack still needs one more full-apply
+# pass to actually finish creating everything.
+
 resource "aws_vpc" "this" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
