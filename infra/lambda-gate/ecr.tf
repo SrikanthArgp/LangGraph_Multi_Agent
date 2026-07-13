@@ -28,6 +28,14 @@
 # read-back (ecr:ListTagsForResource, missing from the deploy role's IAM policy — fixed in
 # infra/bootstrap/github-oidc.tf). Confirmed aws_ecr_repository.backend was still recorded in
 # Terraform state despite that later failure, so no "already exists" conflict on retry.
+#
+# A fourth gap, same first-real-AWS pass: the full apply (lambda.tf/apigateway.tf/cloudfront.tf/
+# s3.tf/ssm.tf all at once) partially succeeded before hitting a batch of read-permission
+# AccessDenied errors (iam:ListAttachedRolePolicies, logs:DescribeLogGroups,
+# ssm:DescribeParameters, s3:GetBucketAcl — fixed in infra/bootstrap/github-oidc.tf) —
+# aws_apigatewayv2_stage.default and aws_cloudfront_function.url_rewrite were both created before
+# the batch of errors surfaced, confirming Terraform validates/reads the whole plan rather than
+# stopping at the first resource that fails.
 resource "aws_ecr_repository" "backend" {
   name                 = "${var.project_name}-backend"
   image_tag_mutability = "MUTABLE"
