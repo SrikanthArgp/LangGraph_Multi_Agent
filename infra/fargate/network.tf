@@ -93,7 +93,10 @@ resource "aws_security_group" "alb" {
 # Gateway, not so the ALB's own health checks/routing can be bypassed.
 resource "aws_security_group" "ecs_task" {
   name        = "${local.name_prefix}-task"
-  description = "ECS task: only the ALB's security group can reach the container port; all egress"
+  # No apostrophe here (unlike the comment above) - EC2's CreateSecurityGroup only accepts
+  # descriptions from a-zA-Z0-9. _-:/()#,@[]+=&;{}!$* - apostrophes are rejected outright, a real
+  # gap found on this stack's first real-AWS apply.
+  description = "ECS task: only the ALB security group can reach the container port; all egress"
   vpc_id      = aws_vpc.this.id
 
   ingress {
