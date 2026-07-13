@@ -75,6 +75,15 @@ jobs:
       # Secrets holding the same JSON shape as that file's `secrets = { ... }` map — see
       # real-aws-cicd-setup.md Step 5 for how AWS_SECRETS_JSON was created and wired in.
       TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || secrets.AWS_SECRETS_JSON }}
+      # Real gap found on the first real-AWS CD dispatch (2026-07-13): neither this workflow nor
+      # cd-ecs.yml ever set use_localstack for Terraform at all — it silently defaulted to `true`
+      # (infra/lambda-gate/variables.tf) on every terraform call regardless of inputs.environment,
+      # which forced the provider into LocalStack mode (dummy "test"/"test" creds, every AWS API
+      # call routed at http://localhost:4566) even in `aws` mode. Only surfaced as the "failed to
+      # get shared config profile, localstack" error first, since that's the earliest place the
+      # provider block touches var.use_localstack — the endpoint-routing/dummy-credential
+      # consequences would have hit next had this alone been "fixed" by patching providers.tf.
+      TF_VAR_use_localstack: ${{ inputs.environment == 'localstack' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -59,6 +59,9 @@ jobs:
       # default and secrets.auto.tfvars is gitignored, so it's not present on a fresh checkout.
       # AWS_SECRETS_JSON is this stack's own real-AWS answer — see real-aws-cicd-setup.md Step 5.
       TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || secrets.AWS_SECRETS_JSON }}
+      # See cd-lambda.yml's identical comment — use_localstack was never set by either workflow,
+      # silently defaulting to `true` on every terraform call regardless of inputs.environment.
+      TF_VAR_use_localstack: ${{ inputs.environment == 'localstack' }}
       # See cd-lambda.yml's identical comment — MSYS argv path-conversion mangles any
       # `--name /crag/...` argument on this Git-Bash self-hosted runner.
       MSYS_NO_PATHCONV: "1"
