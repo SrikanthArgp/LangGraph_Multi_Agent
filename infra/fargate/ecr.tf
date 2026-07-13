@@ -7,6 +7,12 @@
 # leftover manual-deploy tooling from before CD existed. See infra/lambda-gate/ecr.tf's identical
 # comment on why a reset LocalStack instance should be recovered through a real CD run (diff
 # touching this directory) rather than by hand.
+#
+# Same paths-filter single-commit-diff gap documented in infra/lambda-gate/ecr.tf's identical
+# comment, hit here on this stack's first real-AWS dispatch: the prior commit didn't touch
+# infra/fargate/**, so cd-ecs.yml took the fast (image-only) path against a stack that had never
+# been applied, and failed pushing to a nonexistent ECR repo. This comment's own diff is the
+# recovery, forcing the slow (full terraform apply) path on the next dispatch.
 resource "aws_ecr_repository" "backend" {
   name                 = "${local.name_prefix}-backend"
   image_tag_mutability = "MUTABLE"
