@@ -1,6 +1,10 @@
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
+
+  # See infra/lambda-gate/providers.tf's identical comment — profile is gated behind
+  # use_localstack for the same reason: an ephemeral ubuntu-latest CD runner authenticating via
+  # OIDC-minted env-var credentials has no "localstack"-named AWS CLI profile to resolve.
+  profile = var.use_localstack ? var.aws_profile : null
 
   # See infra/bootstrap/main.tf's provider block for what each of these does — identical
   # reasoning, duplicated here because Terraform provider blocks can't be shared/imported

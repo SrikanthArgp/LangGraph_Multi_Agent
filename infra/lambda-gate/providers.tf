@@ -1,6 +1,14 @@
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
+
+  # Real gap found on the first real-AWS CD dispatch (2026-07-13): this was unconditional
+  # (`profile = var.aws_profile`), not gated by use_localstack the way access_key/secret_key
+  # below correctly are. var.aws_profile defaults to "localstack" — a named AWS CLI profile that
+  # only exists in this dev machine's own ~/.aws/config, not on an ephemeral ubuntu-latest CD
+  # runner authenticating via OIDC-minted env-var credentials. Failed with "loading configuration:
+  # failed to get shared config profile, localstack". Only ever worked for LocalStack CI runs by
+  # coincidence, since the self-hosted runner is this same dev machine.
+  profile = var.use_localstack ? var.aws_profile : null
 
   # See infra/bootstrap/main.tf's provider block for what each of these does — identical
   # reasoning, duplicated here because Terraform provider blocks can't be shared/imported
