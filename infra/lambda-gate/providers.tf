@@ -1,3 +1,9 @@
+# Re-touched (no content change) to force paths-filter's slow-path detection on the next
+# cd-lambda.yml dispatch — same recurring single-commit-diff gap documented in ecr.tf. LocalStack
+# was reset (fresh container, infra/bootstrap/ reapplied 2026-07-14) so this stack has no
+# resources at all right now, but the last real commit only touched docs, so a non-infra diff
+# would take the fast (image-only) path against a stack that doesn't exist yet.
+
 provider "aws" {
   region = var.aws_region
 

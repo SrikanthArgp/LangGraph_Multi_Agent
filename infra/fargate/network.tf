@@ -23,6 +23,10 @@ data "aws_availability_zones" "available" {
 # on a missing IAM permission (see infra/bootstrap/github-oidc.tf's cd_ecs_compute fix), and the
 # fix commit itself didn't touch infra/fargate/**, so this stack still needs one more full-apply
 # pass to actually finish creating everything.
+#
+# Re-touched again (2026-07-14, still no content change): LocalStack was reset (fresh container,
+# infra/bootstrap/ reapplied) so this stack has no resources at all right now, but the last real
+# commit only touched docs — same gap, same recovery.
 
 resource "aws_vpc" "this" {
   cidr_block           = "10.0.0.0/16"
