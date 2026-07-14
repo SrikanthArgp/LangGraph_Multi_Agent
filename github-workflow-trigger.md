@@ -152,6 +152,17 @@ Leave `infra/bootstrap` alone — it's shared and not part of either deploy stac
   CloudFront's connection to it has caught up. Already mitigated (`cd-ecs.yml`'s smoke check now
   retries 10× at 5s), but if it still happens, retrying the identical `curl` by hand a few seconds
   later is a good first check before assuming something's actually broken.
+- **`terraform init`/`apply` can fail outright on this runner with `Error: Cannot find module
+  'C:\c\gh-runner\...\terraform'`** (an extra `c\` spliced in right after the drive letter) — the
+  default `hashicorp/setup-terraform` wrapper shim mis-resolving its own path under this runner's
+  Git Bash. Already fixed (`terraform_wrapper: false` added to both workflows' `Setup Terraform`
+  step, 2026-07-14), but if it resurfaces after a runner reinstall, that's the flag to check for —
+  see `completed.md`'s 2026-07-14 retrofit entry for the full writeup.
+- **Running `.\run.cmd` through a tool that shells out via `cmd.exe` (rather than a real PowerShell
+  process) silently no-ops** — it prints the `cmd.exe` banner and exits immediately without
+  actually starting the listener, no error. Confirm the runner is really listening via
+  `gh api .../actions/runners --jq '.runners[] | {name, status}'` (expect `status: online`) before
+  dispatching anything, not just that the start command returned success.
 
 ## Re-creating `LOCALSTACK_SECRETS_JSON` if it's ever rotated or deleted
 
