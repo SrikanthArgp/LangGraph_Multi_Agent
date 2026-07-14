@@ -9,6 +9,8 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { streamChatMessage } from "@/lib/sse";
 import { ChatMessage, type ChatMessageData } from "@/components/ChatMessage";
 import { FullScreenMessage } from "@/components/FullScreenMessage";
+import { useAuth } from "@/components/AuthProvider";
+import { SendIcon } from "@/components/icons";
 
 interface MessageResponseWire {
   id: string;
@@ -47,10 +49,13 @@ function ChatPageContent() {
 
   if (!sessionId) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-600 text-lg font-semibold text-white">
+          C
+        </div>
         <p className="text-lg font-medium text-zinc-900 dark:text-zinc-50">No chat selected</p>
         <p className="max-w-sm text-sm text-zinc-500 dark:text-zinc-400">
-          Pick a chat from the sidebar, or click “+ New” to start one.
+          Pick a chat from the sidebar, or click “New chat” to start one.
         </p>
       </div>
     );
@@ -63,6 +68,7 @@ function ChatPageContent() {
 }
 
 function ChatSessionView({ sessionId }: { sessionId: string }) {
+  const { user } = useAuth();
   const [historyStatus, setHistoryStatus] = useState<HistoryStatus>("loading");
   const [messages, setMessages] = useState<ChatMessageData[]>([]);
   const [input, setInput] = useState("");
@@ -159,50 +165,56 @@ function ChatSessionView({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
-        {messages.length === 0 && (
-          <p className="text-center text-sm text-zinc-500 dark:text-zinc-400">
-            Ask something to get started.
-          </p>
-        )}
-        {messages.map((message) => (
-          <ChatMessage key={message.id} {...message} />
-        ))}
-        <div ref={bottomRef} />
+    <div className="flex flex-1 flex-col overflow-hidden bg-white dark:bg-zinc-950">
+      {/* Only this pane scrolls - the input bar below stays pinned to the bottom. */}
+      <div className="scroll-thin flex-1 overflow-y-auto">
+        <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4 sm:p-6">
+          {messages.length === 0 && (
+            <p className="pt-12 text-center text-sm text-zinc-500 dark:text-zinc-400">
+              Ask something to get started.
+            </p>
+          )}
+          {messages.map((message) => (
+            <ChatMessage key={message.id} {...message} username={user?.username} />
+          ))}
+          <div ref={bottomRef} />
+        </div>
       </div>
 
       {streamError && (
         <p
           role="alert"
-          className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+          className="border-t border-red-200 bg-red-50 px-4 py-2 text-center text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
         >
           {streamError}
         </p>
       )}
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void handleSend();
-        }}
-        className="flex gap-2 border-t border-zinc-200 p-3 dark:border-zinc-800"
-      >
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask a question…"
-          disabled={sending}
-          className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/30 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
-        />
-        <button
-          type="submit"
-          disabled={sending || !input.trim()}
-          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+      <div className="shrink-0 border-t border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950 sm:p-4">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleSend();
+          }}
+          className="mx-auto flex max-w-3xl items-center gap-2 rounded-2xl border border-zinc-300 bg-white p-1.5 shadow-sm transition-colors focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/20 dark:border-zinc-700 dark:bg-zinc-900"
         >
-          {sending ? "Sending…" : "Send"}
-        </button>
-      </form>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask a question…"
+            disabled={sending}
+            className="flex-1 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none disabled:opacity-60 dark:text-zinc-50"
+          />
+          <button
+            type="submit"
+            disabled={sending || !input.trim()}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <SendIcon className="h-3.5 w-3.5" />
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

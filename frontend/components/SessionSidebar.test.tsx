@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SessionSidebar } from "./SessionSidebar";
+import { ThemeProvider } from "@/components/ThemeProvider";
 import { setAccessToken } from "@/lib/api";
 
 vi.mock("@/components/AuthProvider", () => ({
@@ -9,6 +10,15 @@ vi.mock("@/components/AuthProvider", () => ({
     logout: vi.fn(),
   }),
 }));
+
+// SessionSidebar renders a ThemeToggle, which needs a ThemeProvider ancestor.
+function renderSidebar() {
+  return render(
+    <ThemeProvider>
+      <SessionSidebar />
+    </ThemeProvider>,
+  );
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -51,16 +61,18 @@ describe("SessionSidebar", () => {
       vi.fn().mockResolvedValue(jsonResponse({ sessions: [session1, session2] })),
     );
 
-    render(<SessionSidebar />);
+    renderSidebar();
 
     expect(await screen.findByText("First chat")).toBeInTheDocument();
-    expect(screen.getByText("New chat")).toBeInTheDocument();
+    // Scoped to the session list: the sidebar's own "New chat" creation button has the
+    // same label as a session with no title (session2), so an unscoped query is ambiguous.
+    expect(within(screen.getByRole("list")).getByText("New chat")).toBeInTheDocument();
   });
 
   it("shows an error state when the list fails to load", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ detail: "boom" }, 500)));
 
-    render(<SessionSidebar />);
+    renderSidebar();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't load/i);
   });
@@ -73,12 +85,16 @@ describe("SessionSidebar", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<SessionSidebar />);
+    renderSidebar();
     await screen.findByText("First chat");
 
-    await userEvent.click(screen.getByText("+ New"));
+    await userEvent.click(screen.getByRole("button", { name: "New chat" }));
 
-    await waitFor(() => expect(screen.getAllByText("New chat")).toHaveLength(1));
+    // One "New chat" text in the list (the newly created, untitled session) - the sidebar's
+    // own "New chat" button lives outside the list, so scoping avoids counting it too.
+    await waitFor(() =>
+      expect(within(screen.getByRole("list")).getAllByText("New chat")).toHaveLength(1),
+    );
     const [, postInit] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
     expect(postInit).toMatchObject({ method: "POST" });
   });
@@ -91,7 +107,7 @@ describe("SessionSidebar", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<SessionSidebar />);
+    renderSidebar();
     const row = (await screen.findByText("First chat")).closest("div")!;
     await userEvent.click(within(row).getByLabelText("Rename chat"));
 
@@ -112,7 +128,7 @@ describe("SessionSidebar", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<SessionSidebar />);
+    renderSidebar();
     const row = (await screen.findByText("First chat")).closest("div")!;
     await userEvent.click(within(row).getByLabelText("Delete chat"));
 
@@ -126,7 +142,7 @@ describe("SessionSidebar", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ sessions: [session1] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<SessionSidebar />);
+    renderSidebar();
     const row = (await screen.findByText("First chat")).closest("div")!;
     await userEvent.click(within(row).getByLabelText("Delete chat"));
 

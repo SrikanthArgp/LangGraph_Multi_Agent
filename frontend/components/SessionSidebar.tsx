@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { LogoutIcon, PencilIcon, PlusIcon, TrashIcon } from "@/components/icons";
 
 export interface SessionResponse {
   id: string;
@@ -101,20 +103,38 @@ export function SessionSidebar() {
     }
   }
 
+  const initial = user?.username?.trim().charAt(0).toUpperCase() || "?";
+
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950">
-      <div className="flex items-center justify-between p-3">
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Chats</h2>
+    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950">
+      {/* Brand - fixed, never scrolls. */}
+      <div className="flex items-center gap-2 px-4 pt-4 pb-1">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-xs font-semibold text-white">
+          C
+        </div>
+        <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+          CRAG Assistant
+        </span>
+      </div>
+
+      {/* New chat - fixed, per the brief: only the session list below scrolls. */}
+      <div className="px-3 pt-3 pb-2">
         <button
           onClick={() => void handleCreate()}
           disabled={creating}
-          className="rounded-md bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 shadow-sm transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
         >
-          + New
+          <PlusIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-500" />
+          New chat
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2">
+      <div className="px-4 pt-2 pb-1 text-xs font-medium tracking-wide text-zinc-400 uppercase dark:text-zinc-500">
+        Recent
+      </div>
+
+      {/* Only this list scrolls. */}
+      <div className="scroll-thin flex-1 overflow-y-auto px-2 pb-2">
         {status === "loading" && (
           <p className="p-2 text-xs text-zinc-500 dark:text-zinc-400">Loading…</p>
         )}
@@ -127,7 +147,7 @@ export function SessionSidebar() {
           <p className="p-2 text-xs text-zinc-500 dark:text-zinc-400">No chats yet.</p>
         )}
 
-        <ul className="space-y-1">
+        <ul className="space-y-0.5">
           {sessions.map((session) => {
             const isActive = session.id === activeSessionId;
             // data-testid is on the <li> since its text content swaps between the title
@@ -159,7 +179,11 @@ export function SessionSidebar() {
                   >
                     <button
                       onClick={() => router.push(`/chat?sessionId=${session.id}`)}
-                      className="flex-1 truncate text-left text-sm text-zinc-800 dark:text-zinc-200"
+                      className={`flex-1 truncate text-left text-sm ${
+                        isActive
+                          ? "font-medium text-emerald-800 dark:text-emerald-200"
+                          : "text-zinc-700 dark:text-zinc-300"
+                      }`}
                       title={sessionLabel(session)}
                     >
                       {sessionLabel(session)}
@@ -167,16 +191,16 @@ export function SessionSidebar() {
                     <button
                       onClick={() => startRename(session)}
                       aria-label="Rename chat"
-                      className="hidden rounded p-1 text-xs text-zinc-500 hover:bg-zinc-300 group-hover:block dark:text-zinc-400 dark:hover:bg-zinc-700"
+                      className="hidden shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-300 group-hover:block dark:text-zinc-400 dark:hover:bg-zinc-700"
                     >
-                      ✎
+                      <PencilIcon className="h-3.5 w-3.5" />
                     </button>
                     <button
                       onClick={() => void handleDelete(session.id)}
                       aria-label="Delete chat"
-                      className="hidden rounded p-1 text-xs text-zinc-500 hover:bg-zinc-300 group-hover:block dark:text-zinc-400 dark:hover:bg-zinc-700"
+                      className="hidden shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-300 group-hover:block dark:text-zinc-400 dark:hover:bg-zinc-700"
                     >
-                      🗑
+                      <TrashIcon className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 )}
@@ -186,14 +210,22 @@ export function SessionSidebar() {
         </ul>
       </div>
 
+      {/* User + logout - fixed at the bottom-left of the shell, never scrolls. */}
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
-        <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
-          {user?.username}
-        </p>
+        <div className="mb-2 flex items-center gap-2">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-300 text-xs font-semibold text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200">
+            {initial}
+          </div>
+          <p className="flex-1 truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
+            {user?.username}
+          </p>
+          <ThemeToggle />
+        </div>
         <button
           onClick={() => void logout()}
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
         >
+          <LogoutIcon className="h-3.5 w-3.5" />
           Log out
         </button>
       </div>

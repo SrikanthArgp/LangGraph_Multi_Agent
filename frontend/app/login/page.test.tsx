@@ -1,7 +1,19 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AuthProvider } from "@/components/AuthProvider";
+import { ThemeProvider } from "@/components/ThemeProvider";
 import LoginPage from "./page";
+
+// LoginPage renders a ThemeToggle, which needs a ThemeProvider ancestor.
+function renderLoginPage() {
+  return render(
+    <ThemeProvider>
+      <AuthProvider>
+        <LoginPage />
+      </AuthProvider>
+    </ThemeProvider>,
+  );
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -12,11 +24,7 @@ describe("LoginPage", () => {
   it("shows a form error instead of crashing when the network is down", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
-    render(
-      <AuthProvider>
-        <LoginPage />
-      </AuthProvider>,
-    );
+    renderLoginPage();
 
     await userEvent.type(screen.getByLabelText("Email"), "alice@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "password123");
@@ -40,11 +48,7 @@ describe("LoginPage", () => {
       ),
     );
 
-    render(
-      <AuthProvider>
-        <LoginPage />
-      </AuthProvider>,
-    );
+    renderLoginPage();
 
     await userEvent.type(screen.getByLabelText("Email"), "alice@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "wrong-password");

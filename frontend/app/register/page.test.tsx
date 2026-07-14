@@ -1,7 +1,19 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AuthProvider } from "@/components/AuthProvider";
+import { ThemeProvider } from "@/components/ThemeProvider";
 import RegisterPage from "./page";
+
+// RegisterPage renders a ThemeToggle, which needs a ThemeProvider ancestor.
+function renderRegisterPage() {
+  return render(
+    <ThemeProvider>
+      <AuthProvider>
+        <RegisterPage />
+      </AuthProvider>
+    </ThemeProvider>,
+  );
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -32,11 +44,7 @@ describe("RegisterPage", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(
-      <AuthProvider>
-        <RegisterPage />
-      </AuthProvider>,
-    );
+    renderRegisterPage();
 
     await userEvent.type(screen.getByLabelText("Email"), "alice@example.com");
     await userEvent.type(screen.getByLabelText("Username"), "alice");
@@ -67,11 +75,7 @@ describe("RegisterPage", () => {
       ),
     );
 
-    render(
-      <AuthProvider>
-        <RegisterPage />
-      </AuthProvider>,
-    );
+    renderRegisterPage();
 
     await userEvent.type(screen.getByLabelText("Email"), "alice@example.com");
     await userEvent.type(screen.getByLabelText("Username"), "alice");

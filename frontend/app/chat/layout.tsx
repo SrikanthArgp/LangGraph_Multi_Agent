@@ -28,7 +28,11 @@ export default function ChatLayout({ children }: { children: ReactNode }) {
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    // h-dvh (not flex-1 off the body): pins this app shell to exactly the viewport
+    // height regardless of the root layout's own height, so overflow-hidden here
+    // reliably contains scrolling to the panes below rather than letting the whole
+    // page scroll - the dvh unit also tracks mobile browser chrome correctly.
+    <div className="flex h-dvh overflow-hidden bg-white dark:bg-zinc-950">
       {/* SessionSidebar reads ?sessionId= via useSearchParams, which requires a Suspense
           boundary during static export builds (Next.js "Missing Suspense boundary with
           useSearchParams" build error otherwise). */}
