@@ -1,5 +1,6 @@
 import logging
 
+from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 
 logger = logging.getLogger(__name__)
@@ -17,4 +18,14 @@ def get_langfuse_handler() -> CallbackHandler | None:
         return CallbackHandler()
     except Exception:
         logger.warning("langfuse_handler_unavailable", exc_info=True)
+        return None
+
+
+def get_langfuse_client() -> Langfuse | None:
+    """Build a Langfuse client for direct API calls (e.g. create_score), same env vars and
+    same never-block-the-caller contract as get_langfuse_handler above."""
+    try:
+        return Langfuse()
+    except Exception:
+        logger.warning("langfuse_client_unavailable", exc_info=True)
         return None

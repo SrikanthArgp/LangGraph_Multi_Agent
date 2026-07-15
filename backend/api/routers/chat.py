@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ from db.crud import messages as messages_crud
 from db.crud import sessions as sessions_crud
 from db.models import ChatSession, Message, User
 from multi_agent.observability.langfuse_client import get_langfuse_handler
+from multi_agent.observability.online_eval import score_generation_quality
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,12 @@ async def _get_owned_session_or_404(
 
 
 def _graph_config(
-    session_id: uuid.UUID, *, trace_name: str, user_id: uuid.UUID, request_id: str
+    session_id: uuid.UUID,
+    *,
+    trace_name: str,
+    user_id: uuid.UUID,
+    request_id: str,
+    handler,
 ) -> dict:
     """Build the LangGraph run config, including Langfuse trace tagging.
 
@@ -61,14 +67,14 @@ def _graph_config(
     request_id_middleware (api/main.py) stamps on this request's OTel span attribute - joining
     on it is how a Tempo trace and its corresponding Langfuse trace get correlated (Phase 14),
     without merging the two tools together.
+
+    `handler` is built by the caller (rather than internally, as before) so the same instance
+    can be read back afterwards for its `last_trace_id`, which is how online eval scores
+    (multi_agent/observability/online_eval.py) get attached to the right trace.
     """
-    callbacks = []
-    handler = get_langfuse_handler()
-    if handler is not None:
-        callbacks.append(handler)
     return {
         "configurable": {"thread_id": str(session_id)},
-        "callbacks": callbacks,
+        "callbacks": [handler] if handler is not None else [],
         "metadata": {
             "langfuse_session_id": str(session_id),
             "langfuse_user_id": str(user_id),
@@ -76,6 +82,15 @@ def _graph_config(
             "request_id": request_id,
         },
     }
+
+
+def _schedule_online_eval(background_tasks: BackgroundTasks, handler, result: dict) -> None:
+    background_tasks.add_task(
+        score_generation_quality,
+        handler.last_trace_id if handler is not None else None,
+        hallucination_grade=result.get("hallucination_grade"),
+        answer_grade=result.get("answer_grade"),
+    )
 
 
 async def _cache_new_messages(
@@ -121,6 +136,7 @@ async def send_message(
     request: Request,
     session_id: uuid.UUID,
     payload: ChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -129,6 +145,7 @@ async def send_message(
     session = await _get_owned_session_or_404(db, session_id, current_user.id)
     question_message = await messages_crud.create_message(db, session.id, "user", payload.question)
 
+    handler = get_langfuse_handler()
     try:
         result = await graph.ainvoke(
             {"question": payload.question},
@@ -137,6 +154,7 @@ async def send_message(
                 trace_name="chat_send_message",
                 user_id=current_user.id,
                 request_id=request.state.request_id,
+                handler=handler,
             ),
         )
     except Exception as e:
@@ -145,6 +163,8 @@ async def send_message(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The assistant failed to produce an answer, please try again",
         ) from e
+
+    _schedule_online_eval(background_tasks, handler, result)
 
     answer_message = await messages_crud.create_message(
         db,
@@ -167,6 +187,7 @@ async def send_message(
 async def stream_message(
     request: Request,
     session_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     question: str = Query(min_length=1, max_length=4000),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -194,6 +215,7 @@ async def stream_message(
     session = await _get_owned_session_or_404(db, session_id, current_user.id)
     question_message = await messages_crud.create_message(db, session.id, "user", question)
 
+    handler = get_langfuse_handler()
     try:
         result = await graph.ainvoke(
             {"question": question},
@@ -202,6 +224,7 @@ async def stream_message(
                 trace_name="chat_stream_message",
                 user_id=current_user.id,
                 request_id=request.state.request_id,
+                handler=handler,
             ),
         )
     except Exception:
@@ -216,6 +239,8 @@ async def stream_message(
             )
 
         return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    _schedule_online_eval(background_tasks, handler, result)
 
     answer_content = result.get("generation") or ""
     answer_message = await messages_crud.create_message(

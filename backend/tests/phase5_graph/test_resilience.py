@@ -102,15 +102,16 @@ def test_route_question_defaults_to_websearch_on_router_failure(monkeypatch):
 def test_grade_generation_accepts_on_hallucination_grader_failure(monkeypatch):
     monkeypatch.setattr(graph, "_grade_hallucination", _always_raises)
 
-    decision = graph.grade_generation_grounded_in_documents_and_question(
-        {
-            "question": "agent memory",
-            "documents": [Document(page_content="x")],
-            "generation": "some answer",
-        }
-    )
+    state = {
+        "question": "agent memory",
+        "documents": [Document(page_content="x")],
+        "generation": "some answer",
+    }
+    state.update(graph.grade_generation(state))
 
-    assert decision == "useful"
+    assert state["hallucination_grade"] is None
+    assert state["answer_grade"] is None
+    assert graph.decide_generation_quality(state) == "useful"
 
 
 def test_grade_generation_accepts_on_answer_grader_failure(monkeypatch):
@@ -119,12 +120,13 @@ def test_grade_generation_accepts_on_answer_grader_failure(monkeypatch):
     )
     monkeypatch.setattr(graph, "_grade_answer", _always_raises)
 
-    decision = graph.grade_generation_grounded_in_documents_and_question(
-        {
-            "question": "agent memory",
-            "documents": [Document(page_content="x")],
-            "generation": "some answer",
-        }
-    )
+    state = {
+        "question": "agent memory",
+        "documents": [Document(page_content="x")],
+        "generation": "some answer",
+    }
+    state.update(graph.grade_generation(state))
 
-    assert decision == "useful"
+    assert state["hallucination_grade"] is True
+    assert state["answer_grade"] is None
+    assert graph.decide_generation_quality(state) == "useful"

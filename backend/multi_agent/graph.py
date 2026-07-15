@@ -10,7 +10,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from multi_agent.chains.answer_grader import answer_grader
 from multi_agent.chains.hallucination_grader import hallucination_grader
 from multi_agent.chains.router import question_router, RouteQuery
-from multi_agent.consts import GENERATE, GRADE_DOCUMENTS, RETRIEVE, WEBSEARCH
+from multi_agent.consts import GENERATE, GRADE_DOCUMENTS, GRADE_GENERATION, RETRIEVE, WEBSEARCH
 from multi_agent.nodes import generate, grade_documents, retrieve, web_search
 from multi_agent.state import GraphState
 
@@ -49,7 +49,15 @@ def decide_to_generate(state):
         return GENERATE
 
 
-def grade_generation_grounded_in_documents_and_question(state: GraphState) -> str:
+def grade_generation(state: GraphState) -> dict:
+    """Grades the latest generation and writes the results to state.
+
+    Split out from the routing decision (decide_generation_quality) so the grades survive
+    past this single conditional-edge evaluation: LangGraph conditional-edge functions can't
+    mutate state, only nodes can, and these grades are also pushed to Langfuse as online eval
+    scores once the graph run completes (api/routers/chat.py) — reusing this self-correction
+    grading instead of a separate scoring pass costs zero extra LLM calls.
+    """
     print("---CHECK HALLUCINATIONS---")
     question = state["question"]
     documents = state["documents"]
@@ -59,29 +67,42 @@ def grade_generation_grounded_in_documents_and_question(state: GraphState) -> st
         hallucination_grade = _grade_hallucination(documents, generation).binary_score
     except Exception:
         logger.warning("hallucination_grading_failed", exc_info=True)
-        # Can't verify groundedness — accept the generation rather than looping
-        # indefinitely between generate/websearch on a degraded grader.
         print("---HALLUCINATION CHECK UNAVAILABLE, ACCEPTING GENERATION---")
+        return {"hallucination_grade": None, "answer_grade": None}
+
+    if not hallucination_grade:
+        print("---DECISION: GENERATION IS NOT GROUNDED IN DOCUMENTS, RE-TRY---")
+        return {"hallucination_grade": False, "answer_grade": None}
+
+    print("---DECISION: GENERATION IS GROUNDED IN DOCUMENTS---")
+    print("---GRADE GENERATION vs QUESTION---")
+    try:
+        answer_grade = _grade_answer(question, generation).binary_score
+    except Exception:
+        logger.warning("answer_grading_failed", exc_info=True)
+        print("---ANSWER CHECK UNAVAILABLE, ACCEPTING GENERATION---")
+        return {"hallucination_grade": True, "answer_grade": None}
+
+    return {"hallucination_grade": True, "answer_grade": answer_grade}
+
+
+def decide_generation_quality(state: GraphState) -> str:
+    hallucination_grade = state.get("hallucination_grade")
+    answer_grade = state.get("answer_grade")
+
+    if hallucination_grade is False:
+        return "not supported"
+    if hallucination_grade is None or answer_grade is None:
+        # Grader unavailable at some point — accept rather than loop indefinitely
+        # between generate/websearch on a degraded grader.
         return "useful"
 
-    if hallucination_grade:
-        print("---DECISION: GENERATION IS GROUNDED IN DOCUMENTS---")
-        print("---GRADE GENERATION vs QUESTION---")
-        try:
-            answer_grade = _grade_answer(question, generation).binary_score
-        except Exception:
-            logger.warning("answer_grading_failed", exc_info=True)
-            print("---ANSWER CHECK UNAVAILABLE, ACCEPTING GENERATION---")
-            return "useful"
-        if answer_grade:
-            print("---DECISION: GENERATION ADDRESSES QUESTION---")
-            return "useful"
-        else:
-            print("---DECISION: GENERATION DOES NOT ADDRESS QUESTION---")
-            return "not useful"
+    if answer_grade:
+        print("---DECISION: GENERATION ADDRESSES QUESTION---")
+        return "useful"
     else:
-        print("---DECISION: GENERATION IS NOT GROUNDED IN DOCUMENTS, RE-TRY---")
-        return "not supported"
+        print("---DECISION: GENERATION DOES NOT ADDRESS QUESTION---")
+        return "not useful"
 
 
 def route_question(state: GraphState) -> str:
@@ -107,6 +128,7 @@ workflow.add_node(RETRIEVE, retrieve)
 workflow.add_node(GRADE_DOCUMENTS, grade_documents)
 workflow.add_node(GENERATE, generate)
 workflow.add_node(WEBSEARCH, web_search)
+workflow.add_node(GRADE_GENERATION, grade_generation)
 
 
 workflow.add_conditional_edges(
@@ -127,9 +149,10 @@ workflow.add_conditional_edges(
     },
 )
 workflow.add_edge(WEBSEARCH, GENERATE)
+workflow.add_edge(GENERATE, GRADE_GENERATION)
 workflow.add_conditional_edges(
-    GENERATE,
-    grade_generation_grounded_in_documents_and_question,
+    GRADE_GENERATION,
+    decide_generation_quality,
     {
         "not supported": GENERATE,
         "useful": END,
