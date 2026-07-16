@@ -1,0 +1,218 @@
+# Phase 21 — CD: EKS (ArgoCD GitOps). See ci-cd-eks-steps.md for design/rationale and
+# project_phase21_argocd_in_progress memory for how ArgoCD itself was installed/proven this pass.
+#
+# workflow_call only — no push/workflow_dispatch trigger of its own. Invoked by cd.yml when a
+# manual run selects target: eks. Same overall shape as cd-lambda.yml/cd-ecs.yml (fast path vs.
+# full-apply path gated on infra/eks/** changes, OIDC role assumption in aws mode, dummy creds on
+# a self-hosted runner in localstack mode) — but with one structural difference: there is no
+# direct "update the running service" AWS API call for this target. The backend pod is deployed
+# by ArgoCD watching this repo's own gitops/multi-agent/ path (an Application resource applied by
+# hand this pass — see the memory above), not by anything this workflow calls directly. This
+# workflow's entire "deploy" step is a bot commit bumping gitops/multi-agent/values.yaml's
+# image.tag and pushing it to main; ArgoCD's automated sync (prune+selfHeal) does the actual
+# rollout asynchronously from there. Assumes the cluster/ArgoCD/Ingress are already bootstrapped
+# (eks-manual-deploy-steps.md's Stage 1-6) — this workflow redeploys, it does not bootstrap.
+name: CD - EKS
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit SHA to build and deploy, resolved by cd.yml (see cd-dispatcher-steps.md)"
+        required: true
+        type: string
+      environment:
+        description: "aws (OIDC, real deploy) or localstack (dummy creds, self-hosted runner)"
+        required: false
+        type: string
+        default: aws
+
+# Same reasoning as cd-lambda.yml/cd-ecs.yml — never cancel a run mid-deploy. Scoped to
+# inputs.sha, not github.ref, since this workflow has no push-triggered ref of its own.
+concurrency:
+  group: cd-eks-${{ inputs.sha }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required to mint the OIDC token in aws mode — also required on the *caller* job in cd.yml
+  contents: write   # the bot commit to gitops/multi-agent/values.yaml needs this, not just read
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.environment == 'localstack' && 'self-hosted' || 'ubuntu-latest' }}
+    # See cd-lambda.yml's identical comment — the self-hosted runner is Windows and defaults
+    # run: steps to pwsh, which can't parse this file's bash syntax.
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      # See cd-lambda.yml's identical comment — var.secrets (infra/eks/variables.tf) has no
+      # default and secrets.auto.tfvars is gitignored, so it's not present on a fresh checkout.
+      TF_VAR_secrets: ${{ inputs.environment == 'localstack' && secrets.LOCALSTACK_SECRETS_JSON || secrets.AWS_SECRETS_JSON }}
+      # See cd-lambda.yml's identical comment — must be explicit, or Terraform silently defaults
+      # to LocalStack mode regardless of inputs.environment.
+      TF_VAR_use_localstack: ${{ inputs.environment == 'localstack' }}
+      # See cd-lambda.yml's identical comment — MSYS argv path-conversion mangles any
+      # leading-"/" argument (SSM parameter names, NEXT_PUBLIC_API_BASE_URL=/v1) on this
+      # Git-Bash self-hosted runner.
+      MSYS_NO_PATHCONV: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}   # NOT the implicit default — see cd-dispatcher-steps.md's sha-propagation note
+          fetch-depth: 2   # need the previous commit to diff infra/eks/** against
+
+      - name: Detect infra changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            infra:
+              - 'infra/eks/**'
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.environment != 'localstack'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cd-eks-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (LocalStack)
+        if: inputs.environment == 'localstack'
+        run: |
+          echo "AWS_ACCESS_KEY_ID=test" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
+          echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+
+      - name: Setup Terraform
+        # See cd-lambda.yml's identical step for the full explanation — ubuntu-latest ships no
+        # Terraform binary; terraform_wrapper: false works around the self-hosted runner's
+        # Git-Bash path-resolution bug in the action's default wrapper shim.
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.7
+          terraform_wrapper: false
+
+      - name: Terraform init (infra changed)
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/eks
+        run: |
+          BACKEND_CONFIG=backend-aws.hcl
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            BACKEND_CONFIG=backend-localstack.hcl
+          fi
+          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
+
+      - name: Ensure ECR repo exists (infra changed, first apply)
+        # Same chicken-and-egg as cd-lambda.yml/cd-ecs.yml — see those files' identical step for
+        # the full explanation. Usually a no-op here since this workflow assumes an
+        # already-bootstrapped cluster (the repo almost always already exists).
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/eks
+        run: terraform apply -target=aws_ecr_repository.backend -auto-approve
+
+      - name: Resolve ECR registry and log in
+        id: ecr
+        run: |
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            REGISTRY="000000000000.dkr.ecr.${{ env.AWS_REGION }}.localhost.localstack.cloud:4566"
+          else
+            REGISTRY="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          fi
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "$REGISTRY"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        env:
+          ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-prod-eks-backend
+          IMAGE_TAG: eks-${{ inputs.sha }}
+        run: |
+          docker build -t "$ECR_REPO:$IMAGE_TAG" -f backend/Dockerfile backend
+          docker push "$ECR_REPO:$IMAGE_TAG"
+
+      - name: Deploy - full apply (infra changed)
+        # Unlike lambda/ecs, infra/eks's own CloudFront resource (cloudfront.tf's data "aws_lb"
+        # lookup) requires the Ingress-provisioned ALB to already exist at apply time — this
+        # workflow redeploys an already-bootstrapped cluster, it does not bootstrap one from
+        # scratch. See eks-manual-deploy-steps.md's Stage 1/Stage 6 split for the from-nothing
+        # path this assumes already happened at least once.
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/eks
+        run: terraform apply -auto-approve
+
+      - name: Bump image tag in gitops/multi-agent/values.yaml (bot commit — the actual deploy trigger)
+        # This IS the deploy for this target. No direct AWS API call rolls the backend pod the
+        # way lambda update-function-code / ecs update-service do — ArgoCD's automated sync
+        # (prune+selfHeal, installed and proven working manually 2026-07-16, see
+        # project_phase21_argocd_in_progress memory) picks up this commit and does the rollout
+        # itself, asynchronously from this job.
+        env:
+          IMAGE_TAG: eks-${{ inputs.sha }}
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          sed -i "s/^  tag: .*/  tag: ${IMAGE_TAG}/" gitops/multi-agent/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gitops/multi-agent/values.yaml
+          git commit -m "cd-eks: bump image.tag to ${IMAGE_TAG}"
+          git push origin main
+
+      - name: Look up current CloudFront domain and distribution ID
+        # No SSM cloudfront_domain parameter exists for this stack (infra/eks/ssm.tf only holds
+        # var.secrets) — looked up by the distribution's own Comment tag instead (cloudfront.tf
+        # sets it to local.name_prefix, "crag-prod-eks"). Domain isn't assumed stable across an
+        # apply that replaces the distribution — see project_cloudfront_domains_change_on_apply
+        # memory — so this is read fresh every run, same as cd-lambda.yml/cd-ecs.yml's own lookups.
+        id: cf
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='crag-prod-eks'].Id" --output text)
+          DOMAIN=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='crag-prod-eks'].DomainName" --output text)
+          echo "dist_id=$DIST_ID" >> "$GITHUB_OUTPUT"
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for ArgoCD to notice and sync, then smoke check
+        # ArgoCD's default git-polling interval is ~3 minutes (no webhook configured this pass —
+        # see ci-cd-eks-steps.md); this workflow has no in-cluster/kubectl access to poll
+        # `kubectl get application` directly (cd_eks_deploy is deliberately scoped to ECR +
+        # Terraform only, no EKS-API-server-facing grant — see infra/bootstrap/github-oidc.tf's
+        # cd_eks_deploy comment), so the app responding through CloudFront is the only outside
+        # signal available. Budget is wide (up to ~6 minutes) to cover one full polling interval
+        # plus pod-roll/readiness time — not a tight few-second retry like cd-ecs.yml's.
+        run: |
+          curl -sf --retry 24 --retry-delay 15 --retry-all-errors "https://${{ steps.cf.outputs.domain }}/health"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend (static export)
+        working-directory: frontend
+        env:
+          NEXT_OUTPUT_MODE: export
+          NEXT_PUBLIC_API_BASE_URL: /v1
+        run: npm run build
+
+      - name: Sync frontend to S3
+        run: |
+          aws s3 sync frontend/out s3://crag-prod-eks-frontend --delete
+
+      - name: Invalidate CloudFront static-asset cache
+        run: |
+          aws cloudfront create-invalidation --distribution-id "${{ steps.cf.outputs.dist_id }}" --paths '/*'
+
+      # No rollback step, unlike cd-lambda.yml (explicit) / cd-ecs.yml (ECS deployment circuit
+      # breaker) — this target has neither wired up yet. A failed smoke check here is a real
+      # signal to investigate (`kubectl get application multi-agent -n argocd`,
+      # `kubectl rollout status`) and fix forward, same as an infra-changed-path failure on the
+      # other two targets. Known gap, not an oversight.

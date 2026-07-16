@@ -7,11 +7,24 @@ provider "aws" {
   # endpoint. access_key/secret_key = "test" is LocalStack's documented placeholder pair, not
   # a real secret (real AWS would reject it outright), so it's fine to leave inline here rather
   # than pull from a var — nothing sensitive to protect.
-  access_key                  = var.use_localstack ? "test" : null
-  secret_key                  = var.use_localstack ? "test" : null
-  skip_credentials_validation = var.use_localstack
+  access_key = var.use_localstack ? "test" : null
+  secret_key = var.use_localstack ? "test" : null
+  # skip_credentials_validation/skip_requesting_account_id forced to true unconditionally
+  # (2026-07-16), not tied to var.use_localstack like skip_metadata_api_check below — the AWS
+  # provider's own internal validation call (its ConfigureProvider-time STS GetCallerIdentity
+  # equivalent) was found to hang indefinitely via the Go AWS SDK on this dev machine against real
+  # AWS specifically, empirically confirmed across multiple bounded test runs: every run with this
+  # left at var.use_localstack (false for real AWS) hung immediately after the first data source
+  # read and never progressed; every run with it forced true got past that point and successfully
+  # refreshed real resources. Real credentials/connectivity independently confirmed fine via the
+  # `aws` CLI throughout (sts get-caller-identity, iam list-roles, raw curl to iam.amazonaws.com —
+  # all instant) — this isn't skipping a check because credentials are bad, it's avoiding a
+  # specific Go-SDK call pattern that hangs on this machine's network path. See variables.tf's
+  # aws_account_id comment for the matching fix to github-oidc.tf's own explicit instance of the
+  # same call pattern (data "aws_caller_identity" "current").
+  skip_credentials_validation = true
   skip_metadata_api_check     = var.use_localstack
-  skip_requesting_account_id  = var.use_localstack
+  skip_requesting_account_id  = true
 
   # S3 path-style addressing (bucket.name in the URL PATH, not as a subdomain) — LocalStack's
   # S3 emulation doesn't support virtual-hosted-style (subdomain) requests the way real S3 does.

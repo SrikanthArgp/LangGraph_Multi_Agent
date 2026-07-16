@@ -13,8 +13,6 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
   thumbprint_list = [data.tls_certificate.github_actions.certificates[0].sha1_fingerprint]
 }
 
-data "aws_caller_identity" "current" {}
-
 locals {
   github_repo = "SrikanthArgp/SearchAssistantProduction"
 }
@@ -50,13 +48,13 @@ resource "aws_iam_role_policy" "cd_lambda_terraform_state" {
       {
         Effect    = "Allow"
         Action    = ["s3:ListBucket"]
-        Resource  = "arn:aws:s3:::crag-terraform-state-${data.aws_caller_identity.current.account_id}"
+        Resource  = "arn:aws:s3:::crag-terraform-state-${var.aws_account_id}"
         Condition = { StringLike = { "s3:prefix" = ["crag/prod/lambda-gate/*"] } }
       },
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = "arn:aws:s3:::crag-terraform-state-${data.aws_caller_identity.current.account_id}/crag/prod/lambda-gate/*"
+        Resource = "arn:aws:s3:::crag-terraform-state-${var.aws_account_id}/crag/prod/lambda-gate/*"
       },
       {
         Effect   = "Allow"
@@ -193,13 +191,13 @@ resource "aws_iam_role_policy" "cd_ecs_terraform_state" {
       {
         Effect    = "Allow"
         Action    = ["s3:ListBucket"]
-        Resource  = "arn:aws:s3:::crag-terraform-state-${data.aws_caller_identity.current.account_id}"
+        Resource  = "arn:aws:s3:::crag-terraform-state-${var.aws_account_id}"
         Condition = { StringLike = { "s3:prefix" = ["crag/prod/fargate/*"] } }
       },
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = "arn:aws:s3:::crag-terraform-state-${data.aws_caller_identity.current.account_id}/crag/prod/fargate/*"
+        Resource = "arn:aws:s3:::crag-terraform-state-${var.aws_account_id}/crag/prod/fargate/*"
       },
       {
         Effect   = "Allow"
@@ -294,6 +292,152 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
         # automatically the first time either service is used — but the calling principal
         # needs permission to trigger that creation. No-op (AlreadyExists, harmless) on every
         # apply after the first.
+        Effect   = "Allow"
+        Action   = ["iam:CreateServiceLinkedRole"]
+        Resource = "arn:aws:iam::*:role/aws-service-role/*"
+      },
+    ]
+  })
+}
+
+# ---------------------------------------------------------------------------
+# cd-eks-deploy-role — used by cd-eks.yml in `aws` mode only. Independent of the two roles above:
+# no shared trust policy, no lambda:*/ecs:* permissions. Phase 21 (2026-07-16).
+#
+# Broader than cd_lambda_deploy/cd_ecs_deploy's "ECR push only" original design (see
+# project_phase21_argocd_in_progress memory) — cd-eks.yml mirrors cd-lambda.yml/cd-ecs.yml's own
+# fast-path/full-apply shape exactly, per explicit instruction, so it needs the same
+# infra-can-change-too surface those two have, generalized to EKS's resource types. Deliberately
+# does NOT include any eks:AccessKubernetesApi-equivalent or kubectl-facing permission — this role
+# only ever runs `terraform apply` against infra/eks/ and pushes a git commit; verifying the actual
+# in-cluster rollout is ArgoCD's job (already proven working manually this session), not this
+# role's.
+# ---------------------------------------------------------------------------
+resource "aws_iam_role" "cd_eks_deploy" {
+  name = "cd-eks-deploy-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.github_actions.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
+        StringLike   = { "token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}:ref:refs/heads/main" }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "cd_eks_terraform_state" {
+  name = "terraform-state"
+  role = aws_iam_role.cd_eks_deploy.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Action    = ["s3:ListBucket"]
+        Resource  = "arn:aws:s3:::crag-terraform-state-${var.aws_account_id}"
+        Condition = { StringLike = { "s3:prefix" = ["crag/prod/eks/*"] } }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = "arn:aws:s3:::crag-terraform-state-${var.aws_account_id}/crag/prod/eks/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Resource = "arn:aws:dynamodb:*:*:table/crag-terraform-locks"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "cd_eks_ecr" {
+  name = "ecr"
+  role = aws_iam_role.cd_eks_deploy.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = "*" },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository",
+          "ecr:TagResource", "ecr:ListTagsForResource",
+          "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
+          "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload",
+        ]
+        Resource = "arn:aws:ecr:*:*:repository/crag-prod-eks-backend"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "cd_eks_compute" {
+  name = "compute"
+  role = aws_iam_role.cd_eks_deploy.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      # eks:* on "*" — same "service doesn't support useful resource-level restriction for most of
+      # its own actions" tradeoff this file already makes for apigateway:*/cloudfront:*/ec2:*/
+      # elasticloadbalancing:* below, not a scoping choice unique to this role.
+      { Effect = "Allow", Action = ["eks:*"], Resource = "*" },
+      # VPC/subnet/IGW/route-table/security-group creation calls largely don't support
+      # resource-level IAM restriction either (standard EC2 limitation) — same tradeoff
+      # cd_ecs_deploy's identical grant already makes.
+      { Effect = "Allow", Action = ["ec2:*"], Resource = "*" },
+      # Needed for cloudfront.tf's data "aws_lb" tag-based lookup of the ALB the Load Balancer
+      # Controller provisions out-of-band — this role never creates the ALB itself (Kubernetes
+      # does), only ever reads it.
+      { Effect = "Allow", Action = ["elasticloadbalancing:*"], Resource = "*" },
+      { Effect = "Allow", Action = ["cloudfront:*"], Resource = "*" },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:Get*", "s3:List*"]
+        Resource = ["arn:aws:s3:::crag-prod-eks-frontend", "arn:aws:s3:::crag-prod-eks-frontend/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource", "ssm:DescribeParameters"]
+        Resource = "arn:aws:ssm:*:*:parameter/crag/prod-eks/*"
+      },
+      { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
+      { Effect = "Allow", Action = ["logs:DescribeLogGroups"], Resource = "*" },
+      {
+        # Scoped to this stack's own 4 roles (infra/eks/iam.tf) — cluster, node, backend_irsa,
+        # alb_controller_irsa. AttachRolePolicy/DetachRolePolicy needed here (not just
+        # PutRolePolicy/DeleteRolePolicy) because eks_cluster/eks_node use AWS-managed-policy
+        # attachments, not inline policies — a real difference from cd_lambda_deploy/
+        # cd_ecs_deploy's execution roles, which only ever use aws_iam_role_policy.
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
+          "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole",
+          "iam:TagRole", "iam:ListRoleTags", "iam:PassRole", "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+        ]
+        Resource = [
+          "arn:aws:iam::*:role/crag-prod-eks-cluster",
+          "arn:aws:iam::*:role/crag-prod-eks-node",
+          "arn:aws:iam::*:role/crag-prod-eks-backend-irsa",
+          "arn:aws:iam::*:role/crag-prod-eks-alb-controller-irsa",
+        ]
+      },
+      {
+        # This stack's own OIDC provider (infra/eks/iam.tf's aws_iam_openid_connect_provider.eks,
+        # federating the cluster's IRSA issuer) — distinct from this file's own GitHub Actions
+        # OIDC provider above, which cd-eks.yml never needs to touch.
+        Effect   = "Allow"
+        Action   = ["iam:CreateOpenIDConnectProvider", "iam:DeleteOpenIDConnectProvider", "iam:GetOpenIDConnectProvider", "iam:TagOpenIDConnectProvider", "iam:ListOpenIDConnectProviderTags", "iam:UpdateOpenIDConnectProviderThumbprint"]
+        Resource = "*" # no resource-level restriction possible before the provider exists / on GetOpenIDConnectProvider's ARN-per-issuer shape
+      },
+      {
+        # First-time-in-account only, same reasoning/no-op-after-first as cd_ecs_deploy's
+        # identical grant — EKS needs its own service-linked role too.
         Effect   = "Allow"
         Action   = ["iam:CreateServiceLinkedRole"]
         Resource = "arn:aws:iam::*:role/aws-service-role/*"

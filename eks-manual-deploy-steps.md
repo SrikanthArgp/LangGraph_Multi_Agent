@@ -29,10 +29,13 @@ terraform apply -var="use_localstack=false" \
   -target=aws_iam_role_policy.alb_controller_irsa \
   -target=aws_ecr_repository.backend \
   -target=aws_ssm_parameter.secrets \
-  -target=aws_s3_bucket.frontend
+  -target=aws_s3_bucket.frontend \
+  -target=aws_internet_gateway.this \
+  -target=aws_route_table.public \
+  -target=aws_route_table_association.public
 ```
 
-Targeting `aws_eks_node_group.this` and the two IRSA role policies pulls in their full dependency chain automatically — VPC, subnets, IGW, route table, the EKS cluster, the node group, the OIDC provider, and both `backend_irsa`/`alb_controller_irsa` roles.
+Targeting `aws_eks_node_group.this` and the two IRSA role policies pulls in their full dependency chain automatically — VPC, subnets, the EKS cluster, the node group, the OIDC provider, and both `backend_irsa`/`alb_controller_irsa` roles. **It does NOT pull in the IGW/route table/route-table-association** — this was this doc's own claim until a from-scratch redeploy on 2026-07-16 disproved it: Terraform's `-target` dependency closure only follows resources an attribute actually *references* (the node group/cluster reference `subnet_ids`, which pulls in the subnets and their VPC), and nothing in that chain references the route table back — the reference direction is the other way (route table → subnet via `route_table_id`/`subnet_id`). Omitting these three explicit targets leaves the public subnets with no route to the internet (falling back to the VPC's default main route table, local-only), so the node's `nodeadm` bootstrap can start but its EC2 API calls (`Fetching instance details`) never complete, and the node group eventually fails with `NodeCreationFailure: Instances failed to join the kubernetes cluster` after ~25-30 min. Confirmed via `aws ec2 get-console-output` showing `nodeadm` retrying `EC2/DescribeInstances` indefinitely, and `aws ec2 describe-route-tables`/`describe-internet-gateways` filtered to this stack coming back empty. Fix: destroy the failed node group (`terraform destroy -target=aws_eks_node_group.this`) and add the three targets above before recreating it.
 
 ## Stage 2 — Point kubectl at the cluster, confirm nodes
 

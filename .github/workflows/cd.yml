@@ -5,8 +5,9 @@
 # development; see cd-dispatcher-steps.md's "Deferred: Adding the Automatic Trigger Later".
 name: CD - Dispatcher
 
-# `eks`/`all` are added to target's options once Phase 21's cd-eks.yml exists — see the commented
-# deploy-eks job below for the exact shape when that day comes.
+# `eks`/`all` added 2026-07-16 (Phase 21) now that cd-eks.yml exists — see the deploy-eks job
+# below. `all` runs all three targets; `both` is kept (Lambda+Fargate only) rather than removed,
+# since existing dispatch history/docs reference it and it's still a meaningful narrower option.
 #
 # `environment` isn't part of the original dispatcher design — added so this dispatcher can drive
 # a LocalStack run (self-hosted runner, dummy creds) as well as a real-AWS run (OIDC,
@@ -22,7 +23,9 @@ on:
         options:
           - lambda
           - fargate
+          - eks
           - both
+          - all
         default: both
       environment:
         description: "Deploy environment"
@@ -35,7 +38,7 @@ on:
 
 jobs:
   deploy-lambda:
-    if: inputs.target == 'lambda' || inputs.target == 'both'
+    if: inputs.target == 'lambda' || inputs.target == 'both' || inputs.target == 'all'
     permissions:
       id-token: write   # required on the caller job, in addition to the callee's own permissions block
       contents: read
@@ -46,7 +49,7 @@ jobs:
     secrets: inherit
 
   deploy-ecs:
-    if: inputs.target == 'fargate' || inputs.target == 'both'
+    if: inputs.target == 'fargate' || inputs.target == 'both' || inputs.target == 'all'
     permissions:
       id-token: write
       contents: read
@@ -56,13 +59,13 @@ jobs:
       environment: ${{ inputs.environment }}
     secrets: inherit
 
-  # Added when Phase 21 is built — not present yet:
-  # deploy-eks:
-  #   if: inputs.target == 'eks' || inputs.target == 'all'
-  #   permissions:
-  #     id-token: write
-  #     contents: write   # cd-eks.yml's bot commit needs this, not just id-token
-  #   uses: ./.github/workflows/cd-eks.yml
-  #   with:
-  #     sha: ${{ github.sha }}
-  #   secrets: inherit
+  deploy-eks:
+    if: inputs.target == 'eks' || inputs.target == 'all'
+    permissions:
+      id-token: write
+      contents: write   # cd-eks.yml's bot commit needs this, not just id-token
+    uses: ./.github/workflows/cd-eks.yml
+    with:
+      sha: ${{ github.sha }}
+      environment: ${{ inputs.environment }}
+    secrets: inherit

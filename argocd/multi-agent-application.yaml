@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: multi-agent
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/SrikanthArgp/SearchAssistantProduction.git
+    targetRevision: main
+    path: gitops/multi-agent
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: image.repository
+          value: 247673029324.dkr.ecr.us-east-1.amazonaws.com/crag-prod-eks-backend
+        - name: serviceAccount.roleArn
+          value: arn:aws:iam::247673029324:role/crag-prod-eks-backend-irsa
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
