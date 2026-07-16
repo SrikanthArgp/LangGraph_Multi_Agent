@@ -9,7 +9,7 @@ image:
   # v2 was the previous EKS stack's tag (destroyed 2026-07-16, own ECR repo). This stack was
   # rebuilt from nothing on the same day with a fresh ECR repo whose only pushed tag is v1 —
   # cd-eks.yml's next dispatch bumps this to an immutable eks-<sha> tag, same as always.
-  tag: v1
+  tag: eks-2ab4fa5ac224e496585b2f92bdd2a39986ff51f6
   pullPolicy: IfNotPresent
 
 replicaCount: 1
