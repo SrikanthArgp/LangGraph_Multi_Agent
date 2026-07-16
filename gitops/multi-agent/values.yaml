@@ -1,14 +1,12 @@
-# No default for image.repository — infra/eks/outputs.tf's ecr_repository_url is only known
-# after that stack's own apply, so it's supplied at install time, not baked in here:
-#   helm upgrade --install multi-agent gitops/multi-agent -n default \
-#     --set image.repository=$(terraform -chdir=infra/eks output -raw ecr_repository_url) \
-#     --set image.tag=<commit-sha-or-latest> \
-#     --set serviceAccount.roleArn=$(terraform -chdir=infra/eks output -raw backend_irsa_role_arn)
-# Phase 21's cd-eks.yml automates the image.tag bump (into a values.yaml override file it
-# commits), not the other two --set values, which don't change per-deploy.
+# Phase 21 (2026-07-16): image.repository and serviceAccount.roleArn are now supplied as fixed
+# Helm parameters on the ArgoCD `multi-agent` Application (kubectl -n argocd get application
+# multi-agent -o yaml) instead of --set at install time, since ArgoCD is what runs `helm
+# template`/`helm upgrade` now, not a human. Those two don't change per-deploy so they live on
+# the Application object, not here. image.tag is the one value that changes per deploy, so it's
+# committed here directly — this is exactly the file cd-eks.yml's bot commit will bump.
 image:
   repository: ""
-  tag: latest
+  tag: v2
   pullPolicy: IfNotPresent
 
 replicaCount: 1
