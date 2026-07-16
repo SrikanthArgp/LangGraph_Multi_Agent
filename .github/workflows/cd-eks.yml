@@ -149,8 +149,19 @@ jobs:
         # (prune+selfHeal, installed and proven working manually 2026-07-16, see
         # project_phase21_argocd_in_progress memory) picks up this commit and does the rollout
         # itself, asynchronously from this job.
+        #
+        # Pushes via BOT_PUSH_TOKEN (a fine-grained PAT, repo secret), not the default
+        # GITHUB_TOKEN — found 2026-07-16 that main's branch protection rejects a direct push
+        # from GITHUB_TOKEN (it isn't an admin, so it doesn't get the same bypass an interactive
+        # `git push` from a repo owner gets: "2 of 2 required status checks are expected").
+        # Converting to a ruleset with GitHub Actions as an explicit bypass actor was tried first
+        # and rejected by GitHub outright ("Actor GitHub Actions integration must be part of the
+        # ruleset source or owner organization") — that bypass mechanism only works for
+        # organization-owned repos, and this is a personal-account repo. A real PAT, scoped to
+        # just this repo with Contents: Read and write, is the actual fix for a personal repo.
         env:
           IMAGE_TAG: eks-${{ inputs.sha }}
+          BOT_PUSH_TOKEN: ${{ secrets.BOT_PUSH_TOKEN }}
         run: |
           git fetch origin main
           git checkout -B main origin/main
@@ -159,7 +170,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add gitops/multi-agent/values.yaml
           git commit -m "cd-eks: bump image.tag to ${IMAGE_TAG}"
-          git push origin main
+          git push "https://x-access-token:${BOT_PUSH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main
 
       - name: Look up current CloudFront domain and distribution ID
         # No SSM cloudfront_domain parameter exists for this stack (infra/eks/ssm.tf only holds
