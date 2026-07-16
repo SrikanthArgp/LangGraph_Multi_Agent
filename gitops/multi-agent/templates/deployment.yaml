@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "multi-agent.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "multi-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "multi-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "multi-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: backend
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          env:
+            - name: APP_ENV
+              value: {{ .Values.env.appEnv | quote }}
+            - name: SSM_PARAMETER_PREFIX
+              value: {{ .Values.env.ssmParameterPrefix | quote }}
+          # Same /health endpoint Phase 16's ALB target group and Phase 12's real dependency
+          # checks (Postgres SELECT 1, Redis PING) already use — reused unchanged here, not a new
+          # endpoint invented for Kubernetes.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

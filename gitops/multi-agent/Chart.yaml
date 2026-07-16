@@ -1,0 +1,10 @@
+apiVersion: v2
+name: multi-agent
+description: >-
+  Backend Deployment/Service/Ingress/HPA/ServiceAccount for the Phase 20 EKS deploy target.
+  Frontend deliberately stays on Phase 15/16's existing S3+CloudFront (plan.md Phase 20 step 3) —
+  this chart is backend-only. Phase 21 points an ArgoCD Application at this same chart path
+  instead of a human running `helm upgrade` by hand.
+type: application
+version: 0.1.0
+appVersion: "latest"

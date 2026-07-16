@@ -1,0 +1,37 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "multi-agent.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "multi-agent.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "multi-agent.fullname" . }}-backend
+                port:
+                  number: {{ .Values.service.port }}
+          # api/main.py mounts /health deliberately outside the /v1 prefix (Phase 12's real
+          # dependency check). Without its own path rule here, the AWS Load Balancer Controller
+          # only creates an ALB listener rule for /v1/* above, so /health falls through to the
+          # ALB's default fixed-404 action — a real gap found testing infra/eks/cloudfront.tf's
+          # own /health behavior (which routes to this same ALB, but the ALB itself had nowhere
+          # to send it). Same gap infra/lambda-gate/cloudfront.tf and infra/fargate/cloudfront.tf
+          # both document, just surfacing one layer down here since this stack's ALB is
+          # Ingress-rule-driven rather than a single catch-all Terraform listener.
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "multi-agent.fullname" . }}-backend
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

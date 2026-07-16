@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "multi-agent.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "multi-agent.labels" . | nindent 4 }}
+spec:
+  # ClusterIP, not LoadBalancer — the Ingress (ingress.yaml) is what provisions the real ALB via
+  # the AWS Load Balancer Controller (plan.md step 4); a Service of type LoadBalancer would
+  # provision a second, redundant Classic/NLB load balancer instead.
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector: {{- include "multi-agent.selectorLabels" . | nindent 4 }}

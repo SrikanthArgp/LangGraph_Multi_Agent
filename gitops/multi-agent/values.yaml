@@ -1,0 +1,71 @@
+# No default for image.repository — infra/eks/outputs.tf's ecr_repository_url is only known
+# after that stack's own apply, so it's supplied at install time, not baked in here:
+#   helm upgrade --install multi-agent gitops/multi-agent -n default \
+#     --set image.repository=$(terraform -chdir=infra/eks output -raw ecr_repository_url) \
+#     --set image.tag=<commit-sha-or-latest> \
+#     --set serviceAccount.roleArn=$(terraform -chdir=infra/eks output -raw backend_irsa_role_arn)
+# Phase 21's cd-eks.yml automates the image.tag bump (into a values.yaml override file it
+# commits), not the other two --set values, which don't change per-deploy.
+image:
+  repository: ""
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# name must exactly match infra/eks/variables.tf's var.backend_service_account (default
+# "default:backend" -> namespace "default", name "backend") — that's the other half of the IRSA
+# trust-policy Condition on infra/eks/iam.tf's aws_iam_role.backend_irsa. Changing this here
+# without also changing that variable (and re-applying) breaks the pod's ability to assume the
+# role, silently — kubectl won't show an error, the pod's SSM calls will just fail at runtime.
+serviceAccount:
+  create: true
+  name: backend
+  roleArn: "" # set via --set at install time, see the image.repository comment above
+
+# Same two env vars infra/fargate/ecs.tf's container definition sets, pointed at this stack's own
+# SSM prefix (infra/eks/network.tf's local.ssm_prefix) — same backend/config.py bootstrap_env()
+# code path Lambda and Fargate both already use. CHROMA_PERSIST_DIR is deliberately not set here
+# either, for the same reason infra/fargate/ecs.tf's comment gives: a pod's container filesystem
+# is writable, unlike Lambda's read-only-outside-/tmp constraint, so ingestion.py's baked-in seed
+# dir can be opened in place.
+env:
+  appEnv: production
+  ssmParameterPrefix: /crag/prod-eks
+
+service:
+  port: 8000
+
+# Sized for a t3.medium node (infra/eks/variables.tf's default node_instance_type) with room left
+# for kubelet/kube-proxy/CNI daemonset overhead — one size up from Phase 16's Fargate task (0.25
+# vCPU / 0.5 GB), same reasoning infra/eks/variables.tf's node_instance_type comment gives.
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Requires a metrics-server installed in-cluster (not shipped by default on EKS, unlike
+# LocalStack's k3d-backed cluster which may already carry one) — a cluster-level addon, not
+# something this chart installs itself, same "own Helm chart, not this app's" treatment plan.md
+# step 4 gives the AWS Load Balancer Controller below.
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+# Requires the AWS Load Balancer Controller running in-cluster (plan.md step 4) — installed via
+# its own Helm chart (eks/aws-load-balancer-controller), not this one, using the
+# alb_controller_irsa IRSA role infra/eks/iam.tf defines. Live as of 2026-07-16: the controller
+# is running in kube-system and has reconciled this Ingress into a real ALB.
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+  path: /v1

@@ -2,13 +2,26 @@
 
 Scope: an EKS cluster + managed node group + IRSA, the AWS Load Balancer Controller (Helm-installed, provisioning a real ALB from a Kubernetes `Ingress` rather than a hand-written Terraform `aws_lb`), the Secrets Store CSI Driver + AWS provider (syncing SSM `SecureString` parameters into a native Kubernetes `Secret`), and a new `gitops/multi-agent/` Helm chart for the backend — provisioned with Terraform + Helm, validated on LocalStack Ultimate before real AWS. Additive, not a replacement for [Phase 16's ECS Fargate](./grand-enterprize-deploy-steps.md) — that phase's cost-driven reasoning stands untouched; this phase exists specifically to get real Kubernetes/Helm experience, now that LocalStack Ultimate also emulates EKS. Full design/rationale lives in `plan.md`'s Phase 20 section and Key Design Decisions table — this doc is the execution checklist. Companion to [`enterprize-deploy-steps.md`](./enterprize-deploy-steps.md) (Phase 15) and [`grand-enterprize-deploy-steps.md`](./grand-enterprize-deploy-steps.md) (Phase 16), both of which this phase reuses config/secrets/state from. Phase 21's ArgoCD/GitOps CD gets its own companion doc, [`ci-cd-eks-steps.md`](./ci-cd-eks-steps.md), the same way Phase 18/19's CD got `cd-lambda-deploy-steps.md`/`cd-ecs-deploy-steps.md` — out of scope here.
 
-Status: planning only, nothing built yet. **Hard prerequisite: Phase 15 must already be applied at least once** (this phase reuses its ECR repo, SSM parameters, Upstash/Supabase config). Phase 16 is *not* a hard prerequisite — Phase 20 provisions its own VPC rather than sharing Phase 16's, see the Open Questions section — but reuses its non-adapter (`plain uvicorn CMD`) image variant unchanged. **Update (2026-07-15):** `plan.md`'s only other gate on this phase — Phases 15–19 being fully built and absorbed — cleared 2026-07-13 (both Stage Cs, Lambda and Fargate, closed against real AWS; see `completed.md`). Nothing in this plan blocks starting Phase 20 now.
+**Status (2026-07-16): built and confirmed live on real AWS** — `infra/eks/` and `gitops/multi-agent/` both exist and are applied; cluster `crag-prod-eks`, backend pod `Running`, ALB provisioned by the AWS Load Balancer Controller, CloudFront live at `https://d3m8imkry3vkn4.cloudfront.net`, login/chat flow manually confirmed working end to end — see `completed.md`'s Phase 20 entry for the full verification. **Four real deviations from this doc's own design were found comparing it against the live cluster/state directly — see the "Built vs. Designed" section right after this one before trusting any specific step below as exactly what was run.** Phase 21 (below this doc's companion, `ci-cd-eks-steps.md`) is not built — every deploy so far is the manual `terraform apply`/`helm install` path this doc always specified. **For exact, copy-pasteable commands matching what's actually built (not this doc's original design), use [`eks-manual-deploy-steps.md`](./eks-manual-deploy-steps.md) instead** — this doc stays as the original design record.
+
+Original prerequisites (still accurate as history): **Phase 15 must already be applied at least once** (this phase reuses its ECR repo, SSM parameters, Upstash/Supabase config). Phase 16 is *not* a hard prerequisite — Phase 20 provisions its own VPC rather than sharing Phase 16's, see the Open Questions section — but reuses its non-adapter (`plain uvicorn CMD`) image variant unchanged. **Update (2026-07-15):** `plan.md`'s only other gate on this phase — Phases 15–19 being fully built and absorbed — cleared 2026-07-13 (both Stage Cs, Lambda and Fargate, closed against real AWS; see `completed.md`).
+
+---
+
+## Built vs. Designed (added 2026-07-16, after comparing this doc against the live cluster)
+
+1. **Secrets: direct IRSA + `boto3`, not the Secrets Store CSI Driver.** The Open Questions section below "resolves" secret access via the Secrets Store CSI Driver + AWS provider syncing SSM into a native `Secret`. Nothing in the live cluster runs that — no `SecretProviderClass` CRD, no CSI DaemonSet, `iam.tf` defines only four roles (`eks_cluster`, `eks_node`, `backend_irsa`, `alb_controller_irsa`, no fifth CSI role). The backend pod's `ServiceAccount` is annotated directly with `backend_irsa`'s ARN, and `config.py`'s existing `bootstrap_env()` (same path Lambda/Fargate use) reads SSM straight from the pod at runtime. Treat every CSI-driver reference below (architecture diagram, Stage A step 6, the Resource Wiring table) as the original design intent, not what's running.
+2. **CloudFront: one Terraform root, not two.** Stage A/B step 14 below calls for "a second, small Terraform config." The live `cloudfront.tf` lives in the same `infra/eks/` root as everything else, using `data "aws_lb"` keyed on the controller's own tags (`elbv2.k8s.aws/cluster`, `ingress.k8s.aws/stack`) instead of a second config — `terraform apply` still runs twice in practice (before and after the Ingress reconciles), just against the same root both times.
+3. **Own S3 bucket, not Phase 15's reused one.** The architecture diagram's "S3 Bucket (reused read-only from Phase 15)" isn't what's live — the actual bucket is `crag-prod-eks-frontend`, independently populated by `infra/eks/scripts/sync_frontend.sh`.
+4. **HPA is wired but not functional yet** — no `metrics-server` in-cluster, so `kubectl get hpa` reports `cpu: <unknown>/70%`. Stage C step 19's autoscaling verification hasn't actually been run. Node count is 1, not the "1-2" this doc describes for that step.
+
+---
 
 **Every step below through Stage C is run manually, by hand — `terraform apply` and `helm install`, invoked directly, not from a GitHub Actions workflow.** No CD automation exists for this phase's own deploy at all; the only workflow that ever touches this stack post-creation is Phase 21's `cd-eks.yml`, and even that never runs `terraform apply`/`helm install` itself — it only bumps an image tag in `gitops/multi-agent/values.yaml` and lets ArgoCD's in-cluster sync apply it (see [`ci-cd-eks-steps.md`](./ci-cd-eks-steps.md)). Confirm this is still the accepted state before starting: nothing in this plan currently proposes wrapping Stage B/C's `terraform apply`/`helm install` in CI, and doing so would need its own design pass (broader IAM for a CI-held role, a Terraform remote-state backend reachable from a runner, etc.) — out of scope for both this doc and Phase 21's.
 
 ---
 
-## Architecture Overview
+## Architecture Overview — as designed (original; see "Built vs. Designed" above for how the live cluster actually differs)
 
 ```mermaid
 flowchart TD
@@ -74,6 +87,65 @@ flowchart TD
     Pod -->|"envFrom: secretRef"| K8sSecret
     Node -.->|protected by| NodeSG
     CP -.->|protected by| ClusterSG
+    Node -->|assumes| NodeRole
+    NodeRole -.->|"ecr:BatchGetImage etc."| ECR
+    Pod -->|"TLS, via IGW public IP"| Upstash
+    Pod -->|TLS| Supabase
+```
+
+## Architecture Overview — as built (live, 2026-07-16)
+
+```mermaid
+flowchart TD
+    Browser(["Browser / Client"])
+
+    subgraph Edge["Edge — CloudFront E2H99CQKLTFMB8 (own distribution)"]
+        CF["CloudFront Distribution\nd3m8imkry3vkn4.cloudfront.net\nsingle /v1/* -> ALB behavior"]
+    end
+
+    subgraph Frontend["Static Frontend (own bucket, NOT reused from Phase 15)"]
+        S3["S3 Bucket: crag-prod-eks-frontend"]
+    end
+
+    subgraph VPC["VPC 10.1.0.0/16 — 2 public subnets + IGW"]
+        subgraph EKS["EKS Cluster: crag-prod-eks"]
+            CP["EKS Control Plane\n(AWS-managed)"]
+            subgraph NG["Managed Node Group: 1x t3.medium\n(HPA min1/max3 wired, non-functional\nno metrics-server installed)"]
+                Node["Worker Node"]
+                Pod["backend Pod\nimage :v1, envFrom NOT used —\nreads SSM directly via IRSA"]
+                LBCPod["aws-load-balancer-controller\nDeployment (kube-system)"]
+            end
+        end
+        ALB["ALB: k8s-default-multiage-...\n(provisioned BY the controller\nfrom the Ingress, not by Terraform)"]
+        TG["Target Group\ntarget_type=ip -> pod directly"]
+    end
+
+    subgraph IAM["IAM (via OIDC provider / IRSA) — 4 roles total, no CSI role"]
+        ClusterRole["EKS Cluster Role"]
+        NodeRole["Node Instance Role"]
+        LBCRole["IRSA: aws-load-balancer-controller"]
+        BackendRole["IRSA: backend_irsa\nssm:GetParameter + kms:Decrypt\ndirectly assumed by the backend pod"]
+    end
+
+    subgraph Config["Config & Registry (own SSM namespace)"]
+        ECR["ECR: crag-prod-eks-backend:v1"]
+        SSM["SSM Parameter Store\n/crag/prod-eks/*"]
+    end
+
+    subgraph External["External SaaS (public HTTPS)"]
+        Upstash["Upstash Redis"]
+        Supabase["Supabase Postgres"]
+    end
+
+    Browser -->|HTTPS| CF
+    CF -->|"default behavior via OAC"| S3
+    CF -->|"/v1/*, /health"| ALB
+    ALB --> TG
+    TG --> Pod
+    LBCPod -.->|"watches Ingress,\nprovisions/updates"| ALB
+    LBCPod -->|assumes| LBCRole
+    Pod -->|"assumes via IRSA,\nboto3 at runtime\n(config.py bootstrap_env)"| BackendRole
+    BackendRole -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
     Node -->|assumes| NodeRole
     NodeRole -.->|"ecr:BatchGetImage etc."| ECR
     Pod -->|"TLS, via IGW public IP"| Upstash
@@ -150,6 +222,8 @@ flowchart TD
 ---
 
 ## Resource Wiring Detail: IAM roles (IRSA), security groups, inputs/outputs (design only)
+
+**The table below documents the original design, including the CSI driver rows — see "Built vs. Designed" at the top of this doc: the live cluster has no CSI driver, no `SecretProviderClass`, and no synced `Secret`. The `backend_irsa` role and its `ssm:GetParameter`/`kms:Decrypt` policy are real and match this table; everything routed through the CSI driver instead goes straight from the backend pod to SSM via that same role.**
 
 Fills in the permissions/roles/SGs/wiring left implicit in Stage A/B above, and closes the open questions. Companion to the equivalent sections in [`enterprize-deploy-steps.md`](./enterprize-deploy-steps.md) (Phase 15, no VPC/SGs at all) and [`grand-enterprize-deploy-steps.md`](./grand-enterprize-deploy-steps.md) (Phase 16, first VPC/SGs in this project) — read those first; this phase's networking model is closest to Phase 16's, with IRSA added on top as the one genuinely new IAM concept.
 
